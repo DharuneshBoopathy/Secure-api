@@ -92,8 +92,8 @@ def get_cors_origins() -> list[str]:
         "http://127.0.0.1:8000",
         "http://localhost:8000",
     ]
-    seen: set[str] = set()
-    out: list[str] = []
+    seen = set()
+    out = []
     for o in defaults + extra:
         if o not in seen:
             seen.add(o)
@@ -122,9 +122,9 @@ def validate_security_settings() -> None:
         # /run/secrets) will have fallen back to their default_factory and will
         # be absent from model_fields_set.
         _trackable = {
-            "secret_key": "SECRET_KEY",
+            "secret_key": "SECRET_KEY",  # nosec B105
             "monitor_api_key": "MONITOR_API_KEY",
-            "admin_password": "ADMIN_PASSWORD",
+            "admin_password": "ADMIN_PASSWORD",  # nosec B105
         }
         auto_generated = {
             env_name: getattr(s, field)

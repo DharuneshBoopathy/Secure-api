@@ -1,7 +1,5 @@
 from typing import Any
 
-import yaml
-
 
 def extract_paths_from_openapi(doc: dict[str, Any]) -> list[tuple[str, str]]:
     """Return list of (METHOD, path_template) from OpenAPI 3.x or Swagger 2."""

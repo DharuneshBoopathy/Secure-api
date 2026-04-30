@@ -9,10 +9,6 @@ from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-
-
-
-log = logging.getLogger(__name__)
 from app.database import get_db
 from app.deps import get_current_user, require_role
 from app.models import RefreshToken, User
@@ -40,6 +36,8 @@ from app.security import (
     verify_password,
 )
 from app.services.audit_service import log_audit_event
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 limiter = Limiter(key_func=get_remote_address)
@@ -90,6 +88,7 @@ def login(request: Request, body: LoginIn, db: Session = Depends(get_db)) -> Aut
             success=False,
         )
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    assert user is not None  # nosec B101 - type narrowing only; user is non-None when ok=True
     access_token, access_exp = create_access_token(user.username)
     refresh_token, refresh_exp = create_refresh_token(user.username)
     db.add(RefreshToken(user_id=user.id, token=hash_token(refresh_token), expires_at=refresh_exp, revoked=False))

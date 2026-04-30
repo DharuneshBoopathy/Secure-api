@@ -1,7 +1,6 @@
 import json
 import logging
 import sys
-from datetime import datetime
 
 from sqlalchemy.orm import Session
 

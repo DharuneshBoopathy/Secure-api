@@ -3,7 +3,7 @@ import hmac
 import io
 import logging
 import math
-import pickle
+import pickle  # nosec B403
 from datetime import timedelta
 from urllib.parse import parse_qs
 
@@ -188,7 +188,7 @@ def load_model(db: Session) -> dict | None:
             )
             return None
     try:
-        return pickle.loads(payload)  # noqa: S301 — payload is HMAC-verified
+        return pickle.loads(payload)  # nosec B301  # noqa: S301 — payload is HMAC-verified
     except Exception:
         log.warning("Failed to unpickle ML model blob; will retrain.")
         return None

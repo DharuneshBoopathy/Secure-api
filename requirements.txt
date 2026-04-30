@@ -29,3 +29,4 @@ prometheus-client>=0.21.0
 
 # OpenAPI handling
 PyYAML>=6.0.2
+types-PyYAML>=6.0.12

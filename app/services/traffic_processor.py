@@ -1,12 +1,9 @@
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-log = logging.getLogger(__name__)
-
-from app.models import Alert, DiscoveredEndpoint, KnownEndpoint, TrafficDailySummary, TrafficEvent
+from app.models import Alert, TrafficDailySummary, TrafficEvent
 from app.security import utc_now
 from app.services import metrics as prom
 from app.services.alerts_util import recent_duplicate
@@ -16,8 +13,10 @@ from app.services.discovery_service import (
     upsert_discovered,
     upsert_shadow_endpoint,
 )
-from app.services.ml_anomaly import is_anomaly, load_model, score_event
+from app.services.ml_anomaly import is_anomaly, score_event
 from app.services.pathutil import is_documented, normalize_path_for_discovery
+
+log = logging.getLogger(__name__)
 
 
 def process_single_event(

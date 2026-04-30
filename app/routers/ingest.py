@@ -5,11 +5,8 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-log = logging.getLogger(__name__)
-
 from app.database import get_db
 from app.deps import require_role
-from app.models import User
 from app.routers.auth import limiter
 from app.schemas import IngestBatch, NginxAccessLog
 from app.security import Role
@@ -17,6 +14,8 @@ from app.services.discovery_service import get_known_templates
 from app.services.ml_anomaly import load_model
 from app.services.pcap_ingest import iter_http_requests_from_pcap
 from app.services.traffic_processor import process_single_event, refresh_gauges
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 

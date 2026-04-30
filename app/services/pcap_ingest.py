@@ -18,7 +18,7 @@ def iter_http_requests_from_pcap(data: bytes) -> Iterator[tuple[str, str]]:
     for _ts, buf in r:
         try:
             eth = dpkt.ethernet.Ethernet(buf)
-        except Exception:
+        except Exception:  # nosec B112
             continue
         ip = eth.data
         if not isinstance(ip, dpkt.ip.IP):

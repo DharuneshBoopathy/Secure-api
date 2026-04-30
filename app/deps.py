@@ -168,7 +168,7 @@ def verify_monitor_key(
             payload = decode_token(token)
             if payload.get("type") == "access" and payload.get("sub"):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
     if auth and settings.allow_query_auth:
         if _secrets.compare_digest(auth, settings.monitor_api_key):
@@ -179,7 +179,7 @@ def verify_monitor_key(
                 payload = decode_token(token)
                 if payload.get("type") == "access" and payload.get("sub"):
                     return
-            except Exception:
+            except Exception:  # nosec B110
                 pass
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

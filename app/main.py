@@ -64,7 +64,7 @@ app.add_middleware(
     expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "Retry-After"],
 )
 app.state.limiter = auth_limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(SlowAPIMiddleware)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, generic_exception_handler)

@@ -22,7 +22,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import AuditLog, Base, RefreshToken, User
-from app.routers.auth import logout
+from app.routers.auth import logout as _logout_wrapped
 from app.routers.auth import refresh as _refresh_wrapped
 from app.schemas import TokenRefreshIn
 from app.security import (
@@ -35,6 +35,7 @@ from app.security import (
 # Bypass the slowapi rate-limit wrapper so the limiter's in-memory counter
 # does not accumulate across tests and cause spurious 429s.
 _refresh = _refresh_wrapped.__wrapped__
+_logout = _logout_wrapped.__wrapped__
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +211,7 @@ def test_unknown_token_not_in_db_returns_401(db, user):
 
 def test_logout_marks_token_revoked(db, user):
     raw, row_id = _seed(db, user.id)
-    logout(body=TokenRefreshIn(refresh_token=raw), db=db)
+    _logout(request=FAKE_REQUEST, body=TokenRefreshIn(refresh_token=raw), db=db)
     row = db.query(RefreshToken).filter(RefreshToken.id == row_id).one()
     assert row.revoked is True
 
@@ -218,7 +219,7 @@ def test_logout_marks_token_revoked(db, user):
 def test_refresh_after_logout_returns_401(db, user):
     from fastapi import HTTPException
     raw, _ = _seed(db, user.id)
-    logout(body=TokenRefreshIn(refresh_token=raw), db=db)
+    _logout(request=FAKE_REQUEST, body=TokenRefreshIn(refresh_token=raw), db=db)
     with pytest.raises(HTTPException) as exc_info:
         _call_refresh(db, raw)
     assert exc_info.value.status_code == 401
@@ -226,5 +227,5 @@ def test_refresh_after_logout_returns_401(db, user):
 
 def test_logout_of_nonexistent_token_is_noop(db, user):
     raw, _ = create_refresh_token("alice")  # never inserted
-    result = logout(body=TokenRefreshIn(refresh_token=raw), db=db)
+    result = _logout(request=FAKE_REQUEST, body=TokenRefreshIn(refresh_token=raw), db=db)
     assert result == {"logged_out": True}

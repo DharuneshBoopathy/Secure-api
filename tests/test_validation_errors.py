@@ -84,13 +84,13 @@ def test_register_rejects_password_too_short():
 
 
 def test_register_accepts_valid_payload():
-    body = RegisterIn(username="alice_99", password="P@ssw0rd!", email="alice@example.com")
+    body = RegisterIn(username="alice_99", password="P@ssw0rd!123X", email="alice@example.com")
     assert body.username == "alice_99"
     assert body.email == "alice@example.com"
 
 
 def test_register_accepts_username_with_dots_hyphens():
-    body = RegisterIn(username="alice.bob-99", password="P@ssw0rd!", email="a@b.com")
+    body = RegisterIn(username="alice.bob-99", password="P@ssw0rd!123X", email="a@b.com")
     assert body.username == "alice.bob-99"
 
 
@@ -129,7 +129,7 @@ def test_change_password_rejects_new_too_short():
 
 
 def test_change_password_accepts_valid_payload():
-    body = ChangePasswordIn(current_password="OldP@ss1!", new_password="NewP@ss2!")
+    body = ChangePasswordIn(current_password="OldP@ss1!", new_password="NewP@ss2!xxxX1")
     assert body.current_password == "OldP@ss1!"
 
 
@@ -150,17 +150,17 @@ def test_admin_create_rejects_invalid_role():
 
 
 def test_admin_create_accepts_admin_role():
-    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!", email="b@b.com", role="admin")
+    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!123X", email="b@b.com", role="admin")
     assert body.role == "admin"
 
 
 def test_admin_create_accepts_editor_role():
-    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!", email="b@b.com", role="editor")
+    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!123X", email="b@b.com", role="editor")
     assert body.role == "editor"
 
 
 def test_admin_create_accepts_viewer_role():
-    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!", email="b@b.com", role="viewer")
+    body = AdminCreateUserIn(username="bob", password="P@ssw0rd!123X", email="b@b.com", role="viewer")
     assert body.role == "viewer"
 
 
