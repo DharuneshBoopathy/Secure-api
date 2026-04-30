@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(python3 *)",
+      "Bash(py *)",
+      "Bash(docker compose *)",
+      "Bash(ls *)",
+      "Bash(where py *)",
+      "Bash(where python *)",
+      "Read(//c/Users/boopa/AppData/Local/Programs/**)",
+      "Bash(ls /c/Python*/python.exe)",
+      "Bash(where python.exe)",
+      "Bash(pip --version)",
+      "Bash(pip3 --version)",
+      "Bash(\"/c/Users/boopa/AppData/Local/Python/bin/python.exe\" -m pytest tests/ -x -q --no-header --tb=short)",
+      "Bash(\"/c/Users/boopa/AppData/Local/Python/bin/python.exe\" -m pytest tests/test_refresh_token_flow.py::test_valid_refresh_returns_access_and_refresh_tokens -x -v --tb=long)",
+      "Bash(grep -o \"### [1-4]\\\\.[^\\\\\\\\\\\\\\\\]*\\\\\\(\\\\\\\\\\\\\\\\n\\\\\\)\\\\{0,200\\\\}\" \"C:/Users/boopa/.claude/projects/C--ANTI-secure-api-main/bc3c8bd8-9236-4f54-b025-284e3220c384.jsonl\")",
+      "Bash(grep -oP '### 4\\\\. `app/routers/auth\\\\.py`.{1,4000}' \"C:/Users/boopa/.claude/projects/C--ANTI-secure-api-main/bc3c8bd8-9236-4f54-b025-284e3220c384.jsonl\")",
+      "Bash(grep -oP '### 3\\\\. `app/main\\\\.py`.{1,3500}' \"C:/Users/boopa/.claude/projects/C--ANTI-secure-api-main/bc3c8bd8-9236-4f54-b025-284e3220c384.jsonl\")"
+    ]
+  }
+}

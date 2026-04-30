@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: api-security-monitor
+    metrics_path: /metrics
+    # Authenticate using the MONITOR_API_KEY via the ?auth= query parameter.
+    # The key is injected by docker-compose via envsubst at container start.
+    params:
+      auth: ["${MONITOR_API_KEY}"]
+    static_configs:
+      # FastAPI web container (Docker inter-container networking)
+      - targets: ["web:8000"]

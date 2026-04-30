@@ -1,0 +1,23 @@
+openapi: 3.0.3
+info:
+  title: Demo Monitored API
+  version: "1.0.0"
+paths:
+  /demo/v1/health:
+    get:
+      summary: Health
+      responses:
+        "200":
+          description: OK
+  /demo/v1/users/{user_id}:
+    get:
+      summary: User by id
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: OK

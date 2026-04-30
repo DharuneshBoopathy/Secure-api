@@ -1,0 +1,18 @@
+# Development convenience override — loaded automatically by `docker compose up`.
+#
+# This file CANNOT supply MySQL/Grafana passwords — Docker Compose resolves
+# ${VAR:?error} in docker-compose.yml from the HOST environment (shell + .env)
+# before service-level values from this file are merged.  You still need a
+# populated .env for the required secrets.
+#
+# What this file DOES do:
+#   - Sets APP_ENV=development so the Python app logs auto-generated secrets
+#     (SECRET_KEY, MONITOR_API_KEY, ADMIN_PASSWORD) instead of aborting.
+#
+# For production, omit this file:
+#   docker compose -f docker-compose.yml up
+
+services:
+  web:
+    environment:
+      APP_ENV: development

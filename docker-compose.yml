@@ -1,0 +1,140 @@
+# Single-file stack — one command starts everything:
+#   docker compose up --build
+#
+# FIRST-TIME SETUP (required before running):
+#   cp .env.example .env
+#   # Edit .env and fill in all required values — see .env.example for guidance.
+#
+# Development: populate .env with dev-friendly values (see .env.example).
+#   docker compose up --build
+#
+# Production: inject secrets via environment variables or CI/CD secrets manager.
+#   docker compose -f docker-compose.yml up --build
+#   (omit the override file to enforce APP_ENV=production strict validation)
+#
+# All variables marked :?<message> below are REQUIRED.
+# Docker Compose will print the message and abort if any are missing or empty.
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: apimonitor-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Required — set MYSQL_ROOT_PASSWORD in .env (copy from .env.example)}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-apimonitor}
+      MYSQL_USER: ${MYSQL_USER:-apimonitor}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Required — set MYSQL_PASSWORD in .env (copy from .env.example)}
+    ports:
+      - "3306:3306"
+    volumes:
+      - apimonitor_mysql:/var/lib/mysql
+    healthcheck:
+      # Uses the same host-env variable so the ping password always matches init.
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot",
+             "-p${MYSQL_ROOT_PASSWORD:?Required — set MYSQL_ROOT_PASSWORD in .env}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+  web:
+    build: .
+    container_name: apimonitor-web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: mysql+pymysql://apimonitor:${MYSQL_PASSWORD}@mysql:3306/apimonitor
+      MONITOR_API_KEY: ${MONITOR_API_KEY:?Required — set MONITOR_API_KEY in .env (min 32 random chars)}
+      SECRET_KEY: ${SECRET_KEY:?Required — set SECRET_KEY in .env (min 32 random chars)}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Required — set ADMIN_PASSWORD in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as r; r.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 1G
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: apimonitor-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - web
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: apimonitor-prometheus
+    restart: unless-stopped
+    # envsubst injects MONITOR_API_KEY into the Prometheus config at startup
+    # so Prometheus can authenticate against the /metrics endpoint.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/prometheus/prometheus.template.yml \
+          | sed "s|\$${MONITOR_API_KEY}|$$MONITOR_API_KEY|g" \
+          > /etc/prometheus/prometheus.yml \
+        && /bin/prometheus \
+          --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --web.console.libraries=/usr/share/prometheus/console_libraries \
+          --web.console.templates=/usr/share/prometheus/consoles
+    environment:
+      MONITOR_API_KEY: ${MONITOR_API_KEY:?Required — set MONITOR_API_KEY in .env}
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.template.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - web
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: apimonitor-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Required — set GRAFANA_ADMIN_PASSWORD in .env (copy from .env.example)}
+      GF_USERS_DEFAULT_THEME: dark
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+volumes:
+  apimonitor_mysql:
+  grafana_data:

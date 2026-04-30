@@ -1,0 +1,13 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pcap
+.pytest_cache/
+.mypy_cache/
+.idea/
+.vscode/
+nginx/logs/
+frontend/node_modules/
+frontend/dist/
