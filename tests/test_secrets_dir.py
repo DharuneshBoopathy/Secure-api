@@ -14,9 +14,6 @@ Confirms that:
      ignored by pydantic-settings (no startup crash).
 """
 
-import os
-import textwrap
-from pathlib import Path
 
 import pytest
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -96,7 +93,7 @@ def test_missing_secrets_dir_does_not_crash():
     """A non-existent secrets_dir must not raise at construction time."""
     Cls = _make_settings_class("/run/secrets/this/does/not/exist")
     try:
-        s = Cls()
+        Cls()
     except Exception as exc:
         pytest.fail(f"Settings() raised unexpectedly with missing secrets_dir: {exc}")
 

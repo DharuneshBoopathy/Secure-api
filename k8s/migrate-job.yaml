@@ -1,0 +1,25 @@
+# Run once before rolling out a new image (see the CD workflow's "migrate"
+# step): `kubectl delete job apimonitor-migrate --ignore-not-found && \
+#          kubectl apply -f k8s/migrate-job.yaml && \
+#          kubectl wait --for=condition=complete job/apimonitor-migrate --timeout=120s`
+# The delete-first step is needed because Job names aren't mutable in place
+# — re-applying the same name without deleting the old (already-Complete)
+# Job first is a no-op, not a re-run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: apimonitor-migrate
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ghcr.io/OWNER/REPO:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: apimonitor-config
+            - secretRef:
+                name: apimonitor-secrets

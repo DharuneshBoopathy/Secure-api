@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apimonitor-web
+  labels:
+    app: apimonitor-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: apimonitor-web
+  template:
+    metadata:
+      labels:
+        app: apimonitor-web
+    spec:
+      containers:
+        - name: web
+          # Replace with your registry/tag — pushed by the "build-and-push"
+          # job in .github/workflows/cd.yml.
+          image: ghcr.io/OWNER/REPO:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: apimonitor-config
+            - secretRef:
+                name: apimonitor-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apimonitor-web
+spec:
+  selector:
+    app: apimonitor-web
+  ports:
+    - port: 80
+      targetPort: 8000
+  type: ClusterIP

@@ -1,0 +1,36 @@
+# Minimal single-process Loki, filesystem-backed — fine for one deployment's
+# worth of log volume. A production/multi-node setup would want object
+# storage (S3/GCS) instead of the filesystem chunk store.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # Short retention on purpose: this is for recent-debugging log search
+  # (docker compose logs, but searchable/filterable), not the compliance
+  # audit trail — that's the audit_log DB table, kept per
+  # docs/data-retention-policy.md, which this does not replace.
+  retention_period: 168h

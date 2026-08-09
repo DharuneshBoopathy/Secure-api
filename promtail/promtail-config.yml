@@ -1,0 +1,35 @@
+# Auto-discovers every container on this Docker host (via docker_sd) and
+# ships its stdout/stderr to Loki, labeled by container name and stream.
+# This is how the structured `audit` JSON lines from
+# app/services/audit_service.py (and every other container's logs — nginx,
+# mysql, web/worker app logs) end up searchable in Grafana's Loki datasource
+# instead of only via `docker compose logs`.
+#
+# CAVEAT: this relies on mounting /var/lib/docker/containers and the Docker
+# socket, which only works on a native Linux Docker host. Docker Desktop
+# (macOS/Windows) runs the daemon inside a VM, so that path isn't reachable
+# from this container — on Docker Desktop, use Loki's Docker driver plugin
+# instead (`docker plugin install grafana/loki-docker-driver`) or ship logs
+# via syslog. Not verified in this environment for that reason — see the
+# README's Observability section.
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      - source_labels: ["__meta_docker_container_name"]
+        regex: "/(.*)"
+        target_label: container
+      - source_labels: ["__meta_docker_container_log_stream"]
+        target_label: stream

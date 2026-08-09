@@ -23,7 +23,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from unittest.mock import patch
 
-from app.models import Base, TrafficEvent
+from app.models import Alert, Base, TrafficEvent
 from app.services.ml_anomaly import (
     FEATURE_COLS,
     _row_features,
@@ -40,7 +40,7 @@ from app.services.ml_anomaly import (
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine, tables=[TrafficEvent.__table__])
+    Base.metadata.create_all(engine, tables=[TrafficEvent.__table__, Alert.__table__])
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session
@@ -49,6 +49,7 @@ def db():
 
 def _event(**overrides) -> TrafficEvent:
     defaults = dict(
+        org_id=1,
         ts=datetime.now(UTC),
         method="GET",
         path="/api/items",
@@ -67,6 +68,7 @@ def _seed(db, n: int) -> None:
     base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(n):
         db.add(TrafficEvent(
+            org_id=1,
             ts=base + timedelta(seconds=i),
             method=["GET", "POST", "PUT"][i % 3],
             path=["/api/users", "/api/items?id=1", "/health"][i % 3],
@@ -83,7 +85,7 @@ def _seed(db, n: int) -> None:
 @pytest.fixture()
 def trained_model(db):
     _seed(db, 60)
-    return train_from_db(db)
+    return train_from_db(db, org_id=1)
 
 
 # ---------------------------------------------------------------------------
@@ -213,20 +215,20 @@ def test_score_event_with_none_model_returns_none():
 
 def test_train_from_db_with_49_rows_returns_none(db):
     _seed(db, 49)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is None, "Should return None when fewer than 50 rows are available"
 
 
 def test_train_from_db_with_50_rows_returns_model(db):
     _seed(db, 50)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is not None, "Should return a trained model when exactly 50 rows are available"
-    assert "iforest" in model
-    assert "lof" in model
+    assert "iforest" in model["global"]
+    assert "lof" in model["global"]
 
 
 def test_train_from_db_with_empty_table_returns_none(db):
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is None
 
 

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: apimonitor-config
+data:
+  APP_ENV: "production"
+  ADMIN_USERNAME: "admin"
+  CORS_ORIGINS: ""
+  # Points at the in-cluster Redis Deployment in redis.yaml. Swap for a
+  # managed Redis (ElastiCache/Memorystore/etc.) endpoint in production —
+  # see the note in redis.yaml about why the bundled Deployment has no
+  # persistence.
+  REDIS_URL: "redis://apimonitor-redis:6379/0"

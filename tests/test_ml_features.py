@@ -15,14 +15,13 @@ Confirms that:
   9. Feature vector length matches len(FEATURE_COLS).
 """
 
-import math
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, TrafficEvent
+from app.models import Alert, Base, TrafficEvent
 from app.services.ml_anomaly import (
     FEATURE_COLS,
     _query_param_count,
@@ -40,7 +39,7 @@ from app.services.ml_anomaly import (
 @pytest.fixture()
 def db():
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine, tables=[TrafficEvent.__table__])
+    Base.metadata.create_all(engine, tables=[TrafficEvent.__table__, Alert.__table__])
     Session = sessionmaker(bind=engine)
     session = Session()
     yield session
@@ -60,6 +59,7 @@ def _make_event(
 ) -> TrafficEvent:
     ts = datetime.now(UTC) - timedelta(hours=hours_ago)
     return TrafficEvent(
+        org_id=1,
         ts=ts,
         method=method,
         path=path,
@@ -228,6 +228,7 @@ def _seed_traffic(db, n: int = 60) -> None:
     methods = ["GET", "POST", "PUT", "DELETE"]
     for i in range(n):
         db.add(TrafficEvent(
+            org_id=1,
             ts=base + timedelta(minutes=i),
             method=methods[i % len(methods)],
             path=paths[i % len(paths)],
@@ -243,15 +244,15 @@ def _seed_traffic(db, n: int = 60) -> None:
 
 def test_train_from_db_returns_model_with_new_features(db):
     _seed_traffic(db, n=60)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is not None
-    assert "iforest" in model
-    assert "lof" in model
+    assert "iforest" in model["global"]
+    assert "lof" in model["global"]
 
 
 def test_train_from_db_model_accepts_15_feature_vector(db):
     _seed_traffic(db, n=60)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is not None
 
     # Manually build a 15-feature vector and call decision_function
@@ -259,21 +260,21 @@ def test_train_from_db_model_accepts_15_feature_vector(db):
     vec = [[0.0] * len(FEATURE_COLS)]
     arr = np.array(vec, dtype=np.float64)
     # Should not raise shape/indexing errors
-    if_score = model["iforest"].decision_function(arr)
-    lof_score = model["lof"].decision_function(arr)
+    if_score = model["global"]["iforest"].decision_function(arr)
+    lof_score = model["global"]["lof"].decision_function(arr)
     assert len(if_score) == 1
     assert len(lof_score) == 1
 
 
 def test_train_from_db_returns_none_when_too_few_rows(db):
     _seed_traffic(db, n=10)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is None
 
 
 def test_score_event_after_training_on_new_features(db):
     _seed_traffic(db, n=60)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is not None
 
     e = _make_event(
@@ -293,7 +294,7 @@ def test_score_event_after_training_on_new_features(db):
 def test_score_event_high_entropy_query_produces_valid_score(db):
     """A request with a high-entropy query string (SQLi-like) scores without error."""
     _seed_traffic(db, n=60)
-    model = train_from_db(db)
+    model = train_from_db(db, org_id=1)
     assert model is not None
 
     # Simulate a BOLA-style request with many params and high entropy

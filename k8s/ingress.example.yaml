@@ -1,0 +1,25 @@
+# Template — host/TLS/ingress-class are environment-specific, so this is
+# not listed in kustomization.yaml. Fill in and apply separately once you
+# know your cluster's ingress controller and DNS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: apimonitor
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod  # or drop if not using cert-manager
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["apimonitor.example.com"]
+      secretName: apimonitor-tls
+  rules:
+    - host: apimonitor.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: apimonitor-web
+                port:
+                  number: 80

@@ -1,0 +1,67 @@
+groups:
+  - name: apimonitor
+    rules:
+      - alert: APIMonitorOpenHighSeverityAlertsHigh
+        expr: sum(active_alerts_total{severity="high"}) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10 open high-severity alerts"
+          description: "{{ $value }} open high-severity alerts (undocumented-endpoint hits, etc.) — see /api/alerts?open_only=true."
+
+      - alert: APIMonitorIngestStalled
+        # Heuristic, not exact: "had traffic in the last hour, but none in
+        # the last 10 minutes." A genuinely quiet API (no real users right
+        # now) will not trigger this since the increase() term is 0 too —
+        # but a brief lull shorter than 10m won't false-positive either.
+        expr: increase(apimonitor_events_ingested_total[1h]) > 0 and rate(apimonitor_events_ingested_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ingest pipeline appears stalled"
+          description: "No events ingested in the last 10 minutes despite recent traffic in the last hour. Check nginx -> web connectivity and, if REDIS_URL is set, the ingest worker (app/worker.py)."
+
+      - alert: APIMonitorMLRetrainFailing
+        # apimonitor_ml_last_retrain_timestamp starts at 0 (unset) on a
+        # fresh deployment; `for: 30m` covers that cold start as long as
+        # the first retrain (immediate at startup, see run_bootstrap_training
+        # in app/main.py) completes within 30 minutes.
+        expr: (time() - apimonitor_ml_last_retrain_timestamp) > 7200
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ML anomaly model has not retrained successfully in over 2 hours"
+          description: "Default retrain interval is ml_retrain_minutes (15m) — a 2h+ gap means every org's retrain is failing, or the leader-elected replica (see app/services/leader.py) is stuck."
+
+      - alert: APIMonitorIngestQueueBacklogHigh
+        # Only meaningful when REDIS_URL is set — the gauge stays at 0
+        # otherwise, so this never fires on a synchronous-ingest deployment.
+        expr: apimonitor_ingest_queue_depth > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ingest queue backlog is growing"
+          description: "{{ $value }} entries pending on the Redis ingest stream — worker replicas (app/worker.py) may be under-provisioned or stuck."
+
+      - alert: APIMonitorIngestDeadLetterGrowing
+        expr: increase(apimonitor_ingest_queue_dead_letter_total[15m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Ingest events are being dead-lettered"
+          description: "At least one ingest event exceeded MAX_RETRIES and moved to apimonitor:ingest:dead — inspect it; whatever event shape caused this will keep failing until fixed."
+
+      - alert: APIMonitorRequestLatencyP95High
+        # 2s is a placeholder, not a measured SLO — see loadtest/README.md.
+        # Tighten this once you have a real p95 baseline for your deployment.
+        expr: histogram_quantile(0.95, rate(apimonitor_request_duration_seconds_bucket[5m])) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 request latency above 2s"
+          description: "p95 has been over 2s for 10+ minutes. See loadtest/ for how to establish a real baseline for this threshold."

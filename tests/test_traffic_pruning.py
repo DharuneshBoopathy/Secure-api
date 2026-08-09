@@ -37,6 +37,7 @@ def db():
 
 def _make_event(ts: datetime) -> TrafficEvent:
     return TrafficEvent(
+        org_id=1,
         ts=ts,
         method="GET",
         path="/test",

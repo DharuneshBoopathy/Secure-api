@@ -13,7 +13,6 @@ Confirms that:
      monkeypatch / env override are honoured without restarting.
 """
 
-import pytest
 from unittest.mock import patch
 
 from app.services.ml_anomaly import is_anomaly
@@ -125,7 +124,7 @@ def test_anomaly_threshold_read_from_env(monkeypatch):
 
 def test_anomaly_threshold_env_1_0_suppresses_score_0_9(monkeypatch):
     """End-to-end: ANOMALY_THRESHOLD=1.0 → score 0.9 is not flagged."""
-    from app.config import Settings, get_settings
+    from app.config import Settings
     monkeypatch.setenv("ANOMALY_THRESHOLD", "1.0")
     # Bypass lru_cache so the monkeypatched env is picked up.
     with patch("app.services.ml_anomaly.get_settings", return_value=Settings()):

@@ -18,7 +18,7 @@ Confirms that:
 from datetime import datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, event as sa_event
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.models import AuditLog, Base, TrafficEvent
@@ -89,7 +89,7 @@ def _call(db, **kwargs) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_first_page_returns_newest_rows_first(db):
-    ids = _seed(db, n=5)
+    _seed(db, n=5)
     result = _call(db, cursor_id=None, limit=3)
     returned_ids = [item.id for item in result["items"]]
     assert returned_ids == sorted(returned_ids, reverse=True), "Rows must be newest-first"
@@ -114,7 +114,7 @@ def test_next_cursor_id_is_none_on_partial_page(db):
 
 
 def test_cursor_id_filters_rows_below_cursor(db):
-    ids = _seed(db, n=5)
+    _seed(db, n=5)
     # ids are 1..5; cursor_id=4 should return rows with id < 4
     result = _call(db, cursor_id=4, limit=10)
     returned_ids = [item.id for item in result["items"]]

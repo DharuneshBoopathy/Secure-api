@@ -1,0 +1,47 @@
+# Convenience default so `kubectl apply -k k8s/` gives you a fully working
+# stack out of the box. Single replica, no persistent volume: losing this
+# pod loses in-flight queue messages and momentarily resets rate-limit
+# counters and scheduler leadership (all three self-heal — see
+# app/services/queue_service.py, app/routers/auth.py, app/services/leader.py
+# — but ingest events queued since the last successful commit are gone).
+# Point REDIS_URL (in configmap.yaml) at a managed Redis with persistence
+# instead for anything beyond dev/staging.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apimonitor-redis
+  labels:
+    app: apimonitor-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apimonitor-redis
+  template:
+    metadata:
+      labels:
+        app: apimonitor-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: apimonitor-redis
+spec:
+  selector:
+    app: apimonitor-redis
+  ports:
+    - port: 6379
+      targetPort: 6379

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apimonitor-worker
+  labels:
+    app: apimonitor-worker
+spec:
+  # Fine to scale independently of apimonitor-web — this consumes the Redis
+  # ingest stream (see app/worker.py), it isn't behind the web Service.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: apimonitor-worker
+  template:
+    metadata:
+      labels:
+        app: apimonitor-worker
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/OWNER/REPO:latest
+          # Idempotent — safe even if apimonitor-migrate's Job already ran;
+          # see the same reasoning on the `worker` service in
+          # docker-compose.yml.
+          command: ["sh", "-c", "alembic upgrade head && python -m app.worker"]
+          envFrom:
+            - configMapRef:
+                name: apimonitor-config
+            - secretRef:
+                name: apimonitor-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

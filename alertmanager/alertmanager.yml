@@ -1,0 +1,45 @@
+# Receivers are driven by ALERT_WEBHOOK_URL, substituted at container start
+# by the same envsubst-style `sed` trick docker-compose.yml already uses for
+# Prometheus's MONITOR_API_KEY.
+#
+# The default in docker-compose.yml is a local blackhole
+# (http://alertmanager:9093/-/reload), so `docker compose up` works with no
+# extra setup and alerts are visibly *routed* (check the Alertmanager UI on
+# :9093) rather than silently discarded by an empty receiver. Point
+# ALERT_WEBHOOK_URL at a real endpoint to actually get paged:
+#
+#   Slack   — create an Incoming Webhook app, use its https://hooks.slack.com/... URL
+#   PagerDuty — use the Events API v2 endpoint, or swap webhook_configs for
+#               pagerduty_configs with a routing_key (see the commented block below)
+#   Generic — any HTTP endpoint that accepts Alertmanager's JSON POST body
+route:
+  receiver: default
+  group_by: ["alertname"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts (ingest stalled, etc.) page immediately and repeat more
+    # aggressively than the warning-level default above.
+    - receiver: critical
+      matchers:
+        - severity = "critical"
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: default
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        send_resolved: true
+
+  - name: critical
+    webhook_configs:
+      - url: "${ALERT_WEBHOOK_URL}"
+        send_resolved: true
+
+    # PagerDuty alternative for the critical route — replace the
+    # webhook_configs block above with this and set the routing key:
+    # pagerduty_configs:
+    #   - routing_key: "${PAGERDUTY_ROUTING_KEY}"
+    #     send_resolved: true

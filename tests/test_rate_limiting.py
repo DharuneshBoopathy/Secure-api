@@ -19,6 +19,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+import app.routers.alerts as alerts_mod
 import app.routers.audit as audit_mod
 import app.routers.inventory as inv_mod
 import app.routers.traffic as traffic_mod
@@ -105,6 +106,21 @@ def test_traffic_stream_has_rate_limit_decorator():
 
 def test_traffic_stream_has_request_parameter():
     sig = inspect.signature(traffic_mod.stream_traffic)
+    assert "request" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# Decorator presence — alerts stream
+# ---------------------------------------------------------------------------
+
+def test_alerts_stream_has_rate_limit_decorator():
+    assert _has_limit(alerts_mod.stream_alerts), (
+        "stream_alerts is missing a @limiter.limit decorator"
+    )
+
+
+def test_alerts_stream_has_request_parameter():
+    sig = inspect.signature(alerts_mod.stream_alerts)
     assert "request" in sig.parameters
 
 
