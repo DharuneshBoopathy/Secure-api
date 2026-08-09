@@ -1,536 +1,838 @@
 # API Security Monitor
 
-A runtime API governance platform that detects shadow APIs, zombie endpoints, and anomalous traffic patterns in real time. Ingests traffic from nginx JSON logs, batch HTTP event feeds, or raw PCAP files and scores every request with an ensemble ML anomaly detector.
+A runtime API governance platform. It ingests traffic from nginx logs, batch
+event feeds, or PCAP uploads; builds a live inventory of every endpoint
+actually being called; flags **shadow APIs** (serving traffic but absent from
+your spec) and **zombie APIs** (documented but no longer used); and scores
+every request with a per-organization ML anomaly detector that explains *why*
+it flagged something.
+
+Multi-tenant, with per-organization data isolation and a two-axis role model.
 
 ---
 
-## Table of Contents
+## Contents
 
-- [Architecture Overview](#architecture-overview)
-- [Quick Start — Docker](#quick-start--docker)
-- [Local Development Setup](#local-development-setup)
-- [Environment Variables](#environment-variables)
-- [Security Model](#security-model)
-- [API Reference](#api-reference)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Local development](#local-development)
+- [Configuration](#configuration)
+- [Security model](#security-model)
+- [API reference](#api-reference)
+- [Frontend](#frontend)
+- [Scaling and deployment](#scaling-and-deployment)
 - [Observability](#observability)
-- [Running Tests](#running-tests)
+- [Data retention and privacy](#data-retention-and-privacy)
+- [Testing](#testing)
+- [Project layout](#project-layout)
+- [Known limitations](#known-limitations)
 
 ---
 
-## Architecture Overview
+## Architecture
 
 ```
-                    ┌──────────────────────────────────────────────┐
-                    │               nginx :80                       │
-                    │  rate-limit 20 r/s · security headers        │
-                    └───────────────────┬──────────────────────────┘
-                                        │ proxy
-                    ┌───────────────────▼──────────────────────────┐
-                    │           FastAPI (uvicorn) :8000             │
-                    │                                               │
-                    │  ┌─────────────┐   ┌──────────────────────┐  │
-                    │  │  Ingest     │   │  REST API + SPA      │  │
-                    │  │  /batch     │──▶│  /api/*              │  │
-                    │  │  /nginx-json│   │  /  (React SPA)      │  │
-                    │  │  /pcap      │   └──────────────────────┘  │
-                    │  └──────┬──────┘                             │
-                    │         │                                     │
-                    │  ┌──────▼──────────────────────────────────┐ │
-                    │  │         Traffic Processor                │ │
-                    │  │  path-normalise · shadow-detect         │ │
-                    │  │  ML anomaly score · alert dedup         │ │
-                    │  └──────┬──────────────────────────────────┘ │
-                    │         │                                     │
-                    │  ┌──────▼──────┐   ┌──────────────────────┐ │
-                    │  │  MySQL 8.0  │   │    APScheduler       │ │
-                    │  │  (ORM)      │   │  retrain · prune     │ │
-                    │  └─────────────┘   │  idle-scan · metrics │ │
-                    │                    └──────────────────────┘ │
-                    └──────────────────────────────────────────────┘
-                                        │ scrape /metrics
-                    ┌───────────────────▼──────────────────────────┐
-                    │         Prometheus :9090 → Grafana :3000      │
-                    └──────────────────────────────────────────────┘
+                    ┌───────────────────────────────────────────┐
+                    │              nginx :80                    │
+                    │   20 r/s rate limit · security headers    │
+                    └────────────────────┬──────────────────────┘
+                                         │
+                    ┌────────────────────▼──────────────────────┐
+                    │          FastAPI (uvicorn) :8000          │
+                    │   /api/ingest/*  ·  /api/*  ·  React SPA   │
+                    └────────────────────┬──────────────────────┘
+                                         │
+                 REDIS_URL unset ────────┴──────── REDIS_URL set
+                        │                                │
+                 process inline                    XADD, return
+                        │                                │
+                        │                  ┌─────────────▼─────────────┐
+                        │                  │  Redis Streams            │
+                        │                  │  queue · rate limits ·    │
+                        │                  │  scheduler leader lock    │
+                        │                  └─────────────┬─────────────┘
+                        │                                │ XREADGROUP
+                        │                  ┌─────────────▼─────────────┐
+                        │                  │  app/worker.py (N pods)   │
+                        └──────────┬───────┴─────────────┬─────────────┘
+                                   │                     │
+                    ┌──────────────▼─────────────────────▼──────────────┐
+                    │              Traffic processor                    │
+                    │  normalize path · detect shadow · ML score ·      │
+                    │  explain · dedupe alerts                          │
+                    └──────────────┬────────────────────────────────────┘
+                                   │
+                    ┌──────────────▼──────────┐   ┌─────────────────────┐
+                    │       MySQL 8.0         │   │  APScheduler        │
+                    │  (Alembic-managed)      │   │  leader-elected     │
+                    └─────────────────────────┘   │  retrain·prune·scan │
+                                                  └─────────────────────┘
+              /metrics │                    │ OTLP spans        │ stdout
+        ┌──────────────▼──────────┐  ┌──────▼───────┐  ┌────────▼────────┐
+        │ Prometheus →Alertmanager│  │    Jaeger    │  │ Promtail → Loki │
+        │        → Grafana        │  │   (traces)   │  │     (logs)      │
+        └─────────────────────────┘  └──────────────┘  └─────────────────┘
 ```
 
-### Core components
+The Redis / worker / tracing / log-shipping layer is **opt-in**. With
+`REDIS_URL` and `OTEL_EXPORTER_OTLP_ENDPOINT` unset, ingestion runs inline in
+the request and tracing is inert — a single-box deployment needs neither.
+
+### Components
 
 | Component | Location | Role |
 |---|---|---|
-| **FastAPI app** | `app/main.py` | Entry point, router registration, lifespan hooks |
-| **Traffic processor** | `app/services/traffic_processor.py` | Per-event normalisation, classification, ML scoring |
-| **ML anomaly engine** | `app/services/ml_anomaly.py` | IsolationForest + LOF ensemble; 15-feature vector |
-| **Discovery service** | `app/services/discovery_service.py` | Shadow/zombie classification, risk scoring |
-| **Audit service** | `app/services/audit_service.py` | Dual-sink structured logging (MySQL + stdout JSON) |
-| **Scheduler** | `app/jobs/scheduler.py` | Background jobs: retrain, prune, idle-scan, metrics |
-| **Frontend SPA** | `frontend/src/` | React + Vite + Tailwind; built output served by FastAPI |
+| FastAPI app | `app/main.py` | Entry point, router registration, lifespan |
+| Traffic processor | `app/services/traffic_processor.py` | Per-event normalization, classification, scoring |
+| ML anomaly engine | `app/services/ml_anomaly.py` | Per-org IsolationForest + LOF ensemble, per-endpoint baselines, versioned and explainable |
+| Discovery service | `app/services/discovery_service.py` | Shadow/zombie classification and risk scoring |
+| Audit service | `app/services/audit_service.py` | Dual-sink logging (MySQL row + stdout JSON) |
+| Scheduler | `app/jobs/scheduler.py` | Retrain, prune, idle-scan, gauges — leader-elected |
+| Ingest queue | `app/services/queue_service.py`, `app/worker.py` | Optional Redis Streams decoupling |
+| Leader election | `app/services/leader.py` | Optional; ensures scheduler write-jobs run once cluster-wide |
+| Tracing | `app/tracing.py` | Optional OpenTelemetry, FastAPI → SQLAlchemy |
+| Frontend SPA | `frontend/src/` | React + Vite + Tailwind, served by FastAPI in production |
 
 ### Data flow
 
-1. Traffic arrives via `/api/ingest/*` (nginx log line, event batch, or PCAP upload).
-2. Each event is path-normalised (`/users/123` → `/users/{id}`), matched against registered OpenAPI endpoints, and scored by the ML model.
-3. Undocumented endpoints are recorded as **shadow endpoints** with a risk score.
-4. Endpoints with declining traffic are promoted through the **zombie lifecycle**: `ACTIVE → DECLINING → IDLE → ZOMBIE → DEAD`.
-5. Anomalous events and lifecycle changes emit **deduplicated alerts** (6-hour suppression window).
-6. A Prometheus gauge is refreshed every 2 minutes for Grafana dashboards.
+1. Traffic arrives at `/api/ingest/*` (nginx log line, event batch, or PCAP).
+2. Each event is path-normalized (`/users/123` → `/users/{id}`), matched
+   against the registered endpoint set, and scored by that org's ML model.
+3. Undocumented paths become **shadow endpoints** with a risk score.
+4. Documented endpoints with declining traffic move through the **zombie
+   lifecycle**: `ACTIVE → DECLINING → IDLE → ZOMBIE → DEAD`.
+5. Anomalies and lifecycle changes raise **deduplicated alerts** carrying a
+   feature-level explanation.
+6. Raw events are kept 30 days, then rolled into `traffic_daily_summary`.
 
 ---
 
-## Quick Start — Docker
-
-One command starts MySQL, the API, nginx, Prometheus, and Grafana:
+## Quick start
 
 ```bash
-# Option A: Makefile (GNU Make required)
-make up
-
-# Option B: Shell wrapper
-./scripts/setup-dev-env.sh && docker compose up --build
-
-# Option C: Manual
-python scripts/setup_dev_env.py   # generates .env with secure random secrets
-docker compose up --build
+cp .env.example .env      # then fill in the required values
+make setup                # generates strong random secrets into .env
+make up                   # docker compose up --build
 ```
-
-> **Note:** `setup_dev_env.py` is idempotent — it skips generation when `.env`
-> already exists with every required secret, and auto-fills the file if any
-> required value is missing.  Pass `--force` (or run `make reset-env`) to
-> rotate every secret.
 
 | Service | URL |
 |---|---|
-| API + SPA | http://localhost:8000 |
-| nginx proxy | http://localhost:80 |
+| Application (via nginx) | http://localhost |
+| API + Swagger UI | http://localhost:8000/docs |
 | Grafana | http://localhost:3000 |
 | Prometheus | http://localhost:9090 |
+| Alertmanager | http://localhost:9093 |
+| Jaeger (traces) | http://localhost:16686 |
 
-On first boot the admin account is provisioned automatically. The generated password is printed **once** to the web container log:
+Log in with `ADMIN_USERNAME` / `ADMIN_PASSWORD` from your `.env`. First run
+creates the bootstrap admin and a "Default Organization".
+
+To run without the optional infrastructure, delete the `redis`, `worker`,
+`jaeger`, `loki`, and `promtail` services from `docker-compose.yml` (or just
+unset `REDIS_URL` / `OTEL_EXPORTER_OTLP_ENDPOINT` on `web`).
+
+### Without Docker
+
+The whole application runs on SQLite with no containers — useful for a quick
+look or an air-gapped box. The schema is dialect-portable, so migrations
+apply unchanged.
 
 ```bash
-docker compose logs web | grep "Initial Admin Password"
+pip install -r requirements.txt
+cd frontend && npm install && npm run build && cd ..   # SPA is served by FastAPI
+
+cat > .env <<'EOF'
+APP_ENV=development
+DATABASE_URL=sqlite:///./apimonitor.db
+SECRET_KEY=local-dev-secret-key-at-least-32-characters-long-abc123
+MONITOR_API_KEY=local-dev-monitor-key-at-least-32-characters-xyz789
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=AdminLocal123!
+ALLOW_QUERY_AUTH=true
+EOF
+
+python -m alembic upgrade head
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-### Kubernetes / Docker Swarm — mounted file secrets
-
-`SECRET_KEY`, `ADMIN_PASSWORD`, and `MONITOR_API_KEY` can be supplied as mounted files instead of environment variables. Create files at `/run/secrets/<VARIABLE_NAME_LOWERCASE>`:
-
-```yaml
-# docker-compose snippet with Docker secrets:
-secrets:
-  secret_key:
-    file: ./secrets/secret_key.txt
-services:
-  web:
-    secrets:
-      - secret_key
-    # omit SECRET_KEY env var entirely
-```
-
-The app reads `/run/secrets/secret_key`, `/run/secrets/admin_password`, and `/run/secrets/monitor_api_key` automatically. Resolution order: **environment variable → `.env` file → `/run/secrets/` file → built-in default**.
+Then open http://127.0.0.1:8000 and sign in with those admin credentials.
+SQLite serializes writes, so this path is for evaluation and development —
+use MySQL for anything with real ingest volume (see
+[`loadtest/README.md`](loadtest/README.md)).
 
 ---
 
-## Local Development Setup
+## Local development
 
-### Prerequisites
-
-- Python 3.11+
-- Node.js 18+
-- Docker (for MySQL and the observability stack)
-
-### Backend
+**Prerequisites:** Python 3.11+, Node.js 18+, Docker.
 
 ```bash
-# 1. Start MySQL, Prometheus, Grafana
-docker compose up -d mysql prometheus grafana
+# 1. Dependencies only (MySQL, Prometheus, Grafana) in Docker
+make dev
 
-# 2. Install Python dependencies
+# 2. Backend
 pip install -r requirements.txt
-
-# 3. Configure environment
-cp .env.example .env
-# Edit .env — DATABASE_URL must point to the local MySQL container
-
-# 4. Start the API server (auto-reload)
+make migrate                       # alembic upgrade head
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
-# 5. (Optional) Seed demo traffic
+# 3. Frontend (separate terminal) — dev server on :5173, proxies /api → :8000
+cd frontend && npm install && npm run dev
+
+# 4. Optional demo data
 python scripts/seed_demo.py
 ```
 
-### Frontend
+| Target | Does |
+|---|---|
+| `make setup` | Generate `.env` with fresh random secrets |
+| `make up` | Full stack via Docker Compose |
+| `make dev` | Dependencies in Docker, app runs on host |
+| `make migrate` | `alembic upgrade head` |
+| `make test` | Backend test suite |
+| `make build-frontend` | Production SPA build |
+| `make logs` / `make down` / `make clean` | Logs, stop, stop+remove volumes |
+
+### Database migrations
+
+Schema is owned entirely by `alembic/`. The app does **not** call
+`create_all()` — the Docker image runs `alembic upgrade head` before uvicorn
+starts.
 
 ```bash
-cd frontend
-npm install
-npm run dev      # dev server on :5173, proxies /api → :8000
-npm run build    # production build into frontend/dist/ (served by FastAPI)
+alembic upgrade head                              # apply
+alembic revision --autogenerate -m "describe it"  # create after editing app/models.py
+alembic downgrade -1                              # roll back one
 ```
+
+**Upgrading a pre-Alembic deployment:** run `alembic stamp head` once before
+deploying the first version that migrates automatically. See
+[ADR 001](docs/adr/001-alembic-migration-strategy.md).
 
 ---
 
-## Environment Variables
+## Configuration
 
-All variables are read by `app/config.py` (pydantic-settings). Resolution order per field: **environment variable → `.env` file → `/run/secrets/<name>` → built-in default**.
+Read by `app/config.py` (pydantic-settings). Resolution order per field:
+**environment variable → `.env` → external secrets manager → `/run/secrets/<name>` → default**.
 
 ### Required in production
 
 | Variable | Description |
 |---|---|
-| `DATABASE_URL` | SQLAlchemy connection string, e.g. `mysql+pymysql://user:pass@host/db` |
-| `SECRET_KEY` | JWT signing key — **minimum 32 characters**, must not start with `change-me`. The app refuses to start if this is weak. |
-| `MONITOR_API_KEY` | Static API key for non-JWT automation clients (`X-Monitor-Key` header). |
-| `ADMIN_PASSWORD` | Bootstrap admin password. Auto-generated as a cryptographically random string if unset; printed once in the startup log. |
-| `MYSQL_ROOT_PASSWORD` | MySQL root password (Docker Compose only). |
-| `MYSQL_PASSWORD` | Password for the `apimonitor` DB user (Docker Compose only). |
-| `GRAFANA_ADMIN_PASSWORD` | Grafana admin password (Docker Compose only). |
+| `DATABASE_URL` | e.g. `mysql+pymysql://user:pass@host/db` |
+| `SECRET_KEY` | JWT signing key, **min 32 chars**; startup fails if weak |
+| `MONITOR_API_KEY` | Bootstrap key for automation clients (`X-Monitor-Key`) |
+| `ADMIN_PASSWORD` | Bootstrap admin password; auto-generated and logged if unset |
+| `MYSQL_ROOT_PASSWORD`, `MYSQL_PASSWORD` | Docker Compose only |
+| `GRAFANA_ADMIN_PASSWORD` | Docker Compose only |
 
-### Optional tuning
+### Optional
 
 | Variable | Default | Description |
 |---|---|---|
-| `ADMIN_USERNAME` | `admin` | Username for the bootstrap admin account. |
-| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm. |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime. |
-| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token lifetime. |
-| `CORS_ORIGINS` | _(empty)_ | Comma-separated extra CORS origins for the browser UI. |
-| `ML_RETRAIN_MINUTES` | `15` | Anomaly model retrain interval in minutes (minimum 5). |
-| `ANOMALY_THRESHOLD` | `0.8` | Normalised score `[0.0–1.0]` above which an event is flagged anomalous. Raise to reduce false positives; lower to increase sensitivity. |
-| `IDLE_THRESHOLD_HOURS` | `24` | Hours of silence before a documented endpoint is considered idle. |
-| `ZOMBIE_WINDOW_DAYS` | `30` | Traffic lookback window for zombie classification. Raw traffic events older than this are also pruned. |
-| `ZOMBIE_IDLE_THRESHOLD_DAYS` | `14` | Days without traffic before an endpoint enters IDLE state. |
-| `ZOMBIE_DEAD_THRESHOLD_DAYS` | `30` | Days without traffic before an endpoint is promoted to DEAD. |
-| `ZOMBIE_LOW_TRAFFIC_RPD` | `1.0` | Requests-per-day threshold below which traffic is considered "low". |
+| `APP_ENV` | `development` | `production` enables strict secret validation |
+| `ADMIN_USERNAME` | `admin` | Bootstrap admin username |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Access token lifetime |
+| `REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token lifetime |
+| `CORS_ORIGINS` | _(empty)_ | Comma-separated extra origins |
+| `ANOMALY_THRESHOLD` | `0.8` | Score `[0–1]` above which an event is anomalous |
+| `ML_RETRAIN_MINUTES` | `15` | Retrain interval (minimum 5) |
+| `LOGIN_LOCKOUT_THRESHOLD` | `5` | Failed logins before lockout |
+| `LOGIN_LOCKOUT_BASE_SECONDS` / `_MAX_SECONDS` | `30` / `900` | Lockout backoff and cap |
+| `IDLE_THRESHOLD_HOURS` | `24` | Silence before an endpoint counts as idle |
+| `ZOMBIE_WINDOW_DAYS` | `30` | Zombie lookback; also the raw-traffic retention window |
+| `ZOMBIE_IDLE_THRESHOLD_DAYS` / `_DEAD_THRESHOLD_DAYS` | `14` / `30` | Lifecycle transitions |
+| `DB_POOL_SIZE` / `DB_POOL_MAX_OVERFLOW` / `DB_POOL_TIMEOUT_SECONDS` | `10` / `20` / `30` | SQLAlchemy pool, per replica |
+| `SECRETS_PROVIDER` | `env` | `vault`, `aws-secrets-manager`, or `gcp-secret-manager` |
+| `ALLOW_QUERY_AUTH` | `false` | Accept `?auth=<token>`. **Required** for the SSE live features (Live Traffic, alert toasts) — `EventSource` cannot send headers |
+| `REDIS_URL` | _(unset)_ | Enables ingest queue, distributed rate limits, leader election |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | _(unset)_ | Enables trace export |
+| `ALERT_WEBHOOK_URL` | local no-op | Alertmanager receiver (Slack/PagerDuty/generic) |
+
+**Connection pooling.** Connections per replica ≈ `DB_POOL_SIZE +
+DB_POOL_MAX_OVERFLOW` under burst. Keep `replicas × that` comfortably under
+MySQL's `max_connections`, leaving headroom for migrations and admin clients.
 
 ---
 
-## Security Model
+## Security model
 
 ### Authentication
 
-Every protected route accepts credentials in one of three forms (evaluated in priority order):
+JWT access + refresh tokens, or `X-Monitor-Key` for automation. Refresh
+tokens are stored as SHA-256 hashes and rotated on every use.
 
-1. `Authorization: Bearer <access-JWT>` header
-2. `X-Monitor-Key: <api-key>` header
-3. `?auth=<jwt-or-api-key>` query parameter (for SSE streams and integrations that cannot set headers)
+**Reuse detection:** replaying an already-rotated refresh token revokes the
+user's *entire* token chain, not just the replayed one, and audit-logs
+`refresh_token_reuse`. The rotation itself is an atomic compare-and-swap, so
+two concurrent refreshes can't both mint valid chains.
 
-JWTs are signed with `SECRET_KEY` using HS256. Access tokens expire after `ACCESS_TOKEN_EXPIRE_MINUTES`. Refresh tokens embed a cryptographically random `jti` claim (RFC 7519 §4.1.7) that makes every token unique regardless of issue time, ensuring the rotation-based replay-protection mechanism always works correctly.
+### Roles — two independent axes
 
-Refresh tokens are stored in MySQL as **SHA-256 hashes** — the plaintext JWT is never persisted. On every `/api/auth/refresh` call the consumed token row is immediately marked revoked and a new row is inserted. Logout unconditionally revokes the submitted token.
+**Platform roles** gate cross-tenant and account-level actions:
 
-### Role-based access control
-
-Three tiers with cumulative privileges:
-
-| Role | Permissions |
+| Role | Can |
 |---|---|
-| `viewer` | Read all monitoring data: alerts, shadow endpoints, zombies, traffic, inventory, anomalies |
-| `editor` | Viewer + ingest traffic, acknowledge alerts/shadows, retire/reactivate zombies, upload OpenAPI specs |
-| `admin` | Editor + user management (CRUD), audit log access |
+| `viewer` | Read own profile |
+| `editor` | Above, plus issue API keys |
+| `admin` | Above, plus manage users, read the platform audit log, right-to-delete, cross-org support access (audit-logged) |
 
-### Password policy
+**Organization roles** gate everything tenant-scoped (traffic, alerts,
+inventory, registry, anomalies):
 
-Passwords must contain: minimum 8 characters, at least one uppercase letter, one lowercase letter, one digit, and one special character. Enforced at registration, self-service password change, and admin user creation. Hashed with **bcrypt** (direct library call — passlib 1.7.x is not used for hashing due to incompatibility with bcrypt 4.x).
-
-The bootstrap admin account is automatically re-keyed if it is found holding the literal string `"admin"` as a password on startup.
-
-### Input validation
-
-All ingest and auth schemas enforce `extra="forbid"` (Pydantic v2) — unknown fields are rejected with HTTP 422. Critical string fields are length-bounded:
-
-| Field | Limit |
+| Role | Can |
 |---|---|
-| `path` / `uri` | max 1 024 characters |
-| `client_ip` / `remote_addr` | max 64 characters |
-| `username` | 3–128 characters, pattern `^[a-zA-Z0-9_\-\.]+$` |
-| `email` | 5–256 characters |
-| `reason` (acknowledge/retire actions) | 3–512 characters |
-| `password` | 8–256 characters |
+| `viewer` | Read the org's data |
+| `editor` | Above, plus ingest, acknowledge, register endpoints |
+| `owner` | Above, plus approve/reject members, change roles, rename, transfer ownership |
+
+A platform `admin` is not automatically an org member — cross-org access is
+possible but audit-logged as `cross_org_access`. See
+[ADR 002](docs/adr/002-multi-tenancy-schema.md).
+
+### Multi-tenancy
+
+Every tenant-scoped table carries `org_id`. Requests select their
+organization via the `X-Org-Id` header, falling back to the caller's sole
+membership when unset. Isolation is verified end-to-end in
+`tests/test_org_data_isolation.py`.
+
+### Other controls
+
+- **Account lockout** — after `LOGIN_LOCKOUT_THRESHOLD` consecutive failures,
+  exponential backoff up to the cap; returns `423 Locked`. Audit-logged.
+- **Admin MFA** — TOTP enrollment (`pyotp`), enforced at login for admins.
+- **Password reset** — single-use SHA-256-hashed token, 30-minute lifetime,
+  revokes all refresh tokens on redemption. No account enumeration. *There is
+  no email integration:* the token is written to the application log for an
+  operator to deliver. Wire this to a mail provider before production use.
+- **Per-integration API keys** — issued, listed, and revoked individually,
+  each bound to one organization with its own audit trail.
+- **ML model signing** — the pickled model blob is HMAC-SHA256 signed with
+  `SECRET_KEY` and verified before `pickle.loads`, closing the RCE surface
+  even if an attacker can write to `ml_model_state`.
+- **Security headers** — HSTS, `X-Content-Type-Options`, `X-Frame-Options`,
+  CSP, `Referrer-Policy`, `Permissions-Policy`; the `server` header is stripped.
+- **No credential logging** — nginx maps `$http_authorization` to a boolean
+  `auth_present` flag, and redacts the value of any `auth` query parameter
+  before logging the URI. Raw JWTs and API keys never reach the access log by
+  either route.
+- **Query-parameter auth is opt-in** (`ALLOW_QUERY_AUTH`). The browser
+  `EventSource` API cannot set request headers, so the two SSE endpoints
+  accept `?auth=<token>`; this flag gates that. It is off by default and must
+  be enabled for the Live Traffic page and alert toasts to work.
+- **No third-party runtime assets** — the SPA loads no external fonts,
+  scripts, or stylesheets, so the strict CSP (`default-src 'self'`) holds and
+  the app functions in air-gapped deployments.
 
 ### Rate limiting
 
-slowapi enforces per-IP limits at the application layer:
-
 | Route group | Limit |
 |---|---|
-| `POST /api/auth/login` | 5 / minute |
-| `POST /api/auth/register` | 3 / minute |
-| `POST /api/auth/refresh` | 10 / minute |
-| `PUT /api/auth/me/password` | 5 / minute |
-| `POST /api/auth/users` (admin) | 10 / minute |
-| `POST /api/ingest/*` | 500 / minute |
-| `GET /api/inventory/*` | 120 / minute |
-| `GET /api/audit` | 60 / minute |
-| `GET /api/traffic/stream` | 30 / minute |
+| `POST /api/auth/login` | 5 / min |
+| `POST /api/auth/register` | 3 / min |
+| `POST /api/auth/refresh` | 10 / min |
+| `POST /api/auth/password-reset/*`, `/mfa/*` | 5 / min |
+| `POST /api/auth/users`, `/api-keys` | 10 / min |
+| `POST /api/ingest/*` | 500 / min |
+| `GET /api/inventory/*` | 120 / min |
+| `GET /api/audit` | 60 / min |
+| `GET /api/traffic/stream`, `/api/alerts/stream` | 30 / min |
 
-The nginx reverse proxy adds a second independent layer: **20 r/s** sustained with a burst allowance of 40 for all `/api/` paths.
+nginx adds an independent layer: 20 r/s sustained, burst 40, on all `/api/`.
 
-### Audit logging
+slowapi's default in-memory storage is **per-process** — with multiple
+replicas each enforces its own counters, multiplying the effective limit. Set
+`REDIS_URL` to make limits correct cluster-wide.
 
-Every mutating auth action (login, register, token refresh, password change, user create/update/deactivate) writes an `AuditLog` database row **and** emits a structured JSON line to stdout simultaneously. Both sinks share the same timestamp so SIEM pipelines can correlate them without clock skew.
+### TLS
 
-Stdout format (one JSON line per event):
-
-```json
-{
-  "audit": true,
-  "event_type": "login_attempt",
-  "actor": "alice",
-  "target": "auth/login",
-  "ip": "10.0.0.1",
-  "user_agent": "Mozilla/5.0 ...",
-  "timestamp": "2024-01-15T12:34:56.789012",
-  "success": true,
-  "details": {}
-}
-```
-
-The `audit` logger uses `propagate=False` and a `%(message)s`-only formatter so no log-framework metadata wraps the JSON line — the output is directly consumable by log aggregation pipelines (Loki, Elasticsearch, Splunk) reading Docker stdout streams.
-
-### Security headers (nginx)
-
-Applied to all responses:
-
-```
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-Referrer-Policy: strict-origin-when-cross-origin
-Permissions-Policy: geolocation=(), microphone=(), camera=()
-```
-
-The `/metrics` endpoint is restricted to internal Docker networks by nginx and is never reachable from the public internet. Prometheus authenticates via the `MONITOR_API_KEY` passed as a query parameter (`params: auth: ["${MONITOR_API_KEY}"]`), which docker-compose injects into `prometheus.yml` at container start.
-
-### ML model signing
-
-The serialized anomaly-detection model stored in `ml_model_state.blob` is prefixed with an **HMAC-SHA256 signature** computed with `SECRET_KEY`. Any blob that fails the HMAC check is refused before it reaches `pickle.loads`, closing the arbitrary-code-execution surface even if an attacker gains write access to the model table. Rotating `SECRET_KEY` invalidates all existing models; the scheduler retrains on the next tick and re-signs automatically.
-
-### Authorization header logging
-
-Nginx maps `$http_authorization` to a boolean `$has_auth` flag (`true`/`false`) before writing the access log. **Raw JWTs and API keys are never logged.** See `nginx/nginx.conf:log_format apimonitor_json` — the `"auth_present"` field carries only the boolean.
-
-### TLS / Production deployment
-
-This application is designed to run **behind a TLS-terminating reverse proxy** or load balancer (e.g., AWS ALB, Cloudflare, Traefik, Caddy, or an nginx gateway with Let's Encrypt):
-
-```
-  Internet
-     │
-     ▼
-  TLS termination (ALB / Cloudflare / Caddy / nginx + certbot)
-     │  plaintext HTTP
-     ▼
-  nginx :80 (rate limiting + security headers)
-     │
-     ▼
-  FastAPI :8000
-```
-
-**Key facts:**
-- The FastAPI middleware already emits `Strict-Transport-Security: max-age=31536000; includeSubDomains` (HSTS) on every response.
-- CORS origins should be set to your production domain via `CORS_ORIGINS=https://yourdomain.com`.
-- The `?auth=` query parameter for SSE streams means TLS is essential to protect tokens in transit.
-
-**Do not** expose port 8000 or port 80 directly to the public internet without TLS in front.
+Designed to run behind a TLS-terminating proxy (ALB, Cloudflare, Traefik,
+Caddy, or nginx with Let's Encrypt). The bundled nginx listens on :80 only.
 
 ---
 
-## API Reference
+## API reference
 
-All routes are prefixed with `/api`. Interactive Swagger UI is available at `/docs`; ReDoc at `/redoc`.
+All routes are under `/api`. Swagger UI at `/docs`, ReDoc at `/redoc`.
 
-### Authentication — `/api/auth`
+### Auth — `/api/auth`
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `POST` | `/login` | public | Issue access + refresh token pair |
-| `POST` | `/register` | public | Self-registration (creates `viewer` account) |
-| `POST` | `/refresh` | public | Rotate refresh token, issue new pair |
+| `POST` | `/login` | public | Issue access + refresh pair |
+| `POST` | `/register` | public | Self-registration (creates a `viewer`) |
+| `POST` | `/refresh` | public | Rotate refresh token |
 | `POST` | `/logout` | public | Revoke refresh token |
-| `GET` | `/me` | viewer | Return authenticated user's profile |
-| `PUT` | `/me/password` | viewer | Change own password |
-| `GET` | `/users` | admin | List all users |
-| `POST` | `/users` | admin | Create user with explicit role |
-| `GET` | `/users/{id}` | admin | Fetch user by ID |
-| `PATCH` | `/users/{id}` | admin | Update role / email / active status |
-| `DELETE` | `/users/{id}` | admin | Soft-deactivate user and revoke all tokens |
+| `POST` | `/password-reset/request` · `/confirm` | public | Token-based reset |
+| `POST` | `/mfa/enroll` · `/enroll/confirm` · `/disable` | admin | TOTP lifecycle |
+| `GET`/`POST`/`DELETE` | `/api-keys` · `/api-keys/{id}` | admin | Per-integration keys; plaintext returned once |
+| `GET`/`PUT` | `/me` · `/me/password` | viewer | Own profile and password |
+| `GET`/`POST`/`PATCH`/`DELETE` | `/users` · `/users/{id}` | admin | User administration |
 
-**Login example:**
+### Organizations — `/api/orgs`
 
-```bash
-TOKEN=$(curl -sX POST http://localhost:8000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"<password>"}' \
-  | jq -r .access_token)
-```
+| Method | Path | Access | Description |
+|---|---|---|---|
+| `POST` · `GET` | `` | authenticated | Create an org (caller becomes owner) · list own orgs |
+| `POST` | `/{id}/join-requests` | authenticated | Request to join (creates `pending`) |
+| `GET` | `/{id}/members` | owner | List members, filter by status |
+| `POST` | `/{id}/members/{uid}/approve` · `/reject` | owner | Decide a join request |
+| `PATCH`/`DELETE` | `/{id}/members/{uid}` | owner | Change role · remove (kept as `revoked`) |
+| `PATCH` | `/{id}` | owner | Rename |
+| `POST` | `/{id}/transfer-ownership` | owner | Transfer; prior owner becomes editor |
 
-### Traffic Ingestion — `/api/ingest`
+### Ingestion — `/api/ingest`
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `POST` | `/batch` | editor | JSON array of `IngestBatchItem` events |
-| `POST` | `/nginx-json` | editor | Single nginx `log_format apimonitor_json` line |
-| `POST` | `/nginx-json-raw` | editor | Raw nginx JSON log line as plain request body |
-| `POST` | `/pcap` | editor | Wireshark `.pcap` upload — cleartext HTTP only, max 50 MB |
-
-**Batch ingest example:**
+| `POST` | `/batch` | editor | Array of `IngestBatchItem` events |
+| `POST` | `/nginx-json` · `/nginx-json-raw` | editor | Single nginx log line |
+| `POST` | `/pcap` | editor | Wireshark `.pcap`, cleartext HTTP only, ≤50 MB |
 
 ```bash
 curl -X POST http://localhost:8000/api/ingest/batch \
-  -H "X-Monitor-Key: <api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "events": [{
-      "method": "GET",
-      "path": "/api/users/123",
-      "status_code": 200,
-      "latency_ms": 12.5,
-      "client_ip": "10.0.0.1",
-      "auth_present": true
-    }]
-  }'
+  -H "X-Monitor-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"events":[{"method":"GET","path":"/api/users/123","status_code":200,"latency_ms":12.5}]}'
 ```
+
+With `REDIS_URL` set these enqueue instead of writing inline, and respond
+`{"queued": N}` rather than `{"ingested": N, "skipped": N}`.
 
 ### Inventory — `/api/inventory`
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `GET` | `/discovered` | viewer | All endpoints observed in traffic |
-| `GET` | `/shadow` | viewer | Undocumented endpoints only |
-| `GET` | `/idle` | viewer | Documented endpoints with no recent traffic |
-| `GET` | `/stats` | viewer | Dashboard counters (events/hour, open alerts, etc.) |
+| `GET` | `/discovered` · `/shadow` · `/idle` | viewer | Observed endpoints, undocumented only, idle only |
+| `GET` | `/stats` | viewer | Dashboard counters |
+| `GET` | `/traffic-trend?days=N` | viewer | Daily request/error series |
 
-### Shadow Endpoints — `/api/shadow`
+`traffic-trend` reads **both** stores: recent days aggregate live from
+`traffic_events`, and days past the 30-day retention window come from
+`traffic_daily_summary` (the raw rows are gone by then). Zero-filled so quiet
+days aren't silently compressed.
 
-| Method | Path | Min role | Description |
-|---|---|---|---|
-| `GET` | `` | viewer | Shadow endpoints with risk scores and evidence |
-| `POST` | `/{id}/acknowledge` | editor | Acknowledge with reason (body: `{"reason": "..."}`) |
-| `POST` | `/{id}/add-to-registry` | editor | Promote shadow to registered OpenAPI endpoint |
-
-Risk levels: `LOW` (read-only, < 10 hits) → `MEDIUM` → `HIGH` → `CRITICAL` (write methods with ≥ 10 hits).
-
-### Zombie Endpoints — `/api/zombie`
+### Registry — `/api/registry`
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `GET` | `` | viewer | Zombie endpoint states with traffic metrics |
-| `GET` | `/summary` | viewer | Lifecycle state counts |
-| `POST` | `/{id}/retire` | editor | Mark endpoint as intentionally retired |
-| `POST` | `/{id}/reactivate` | editor | Reset a retired endpoint to active |
+| `POST` | `/openapi` | editor | Upload an OpenAPI spec (YAML) |
+| `GET` | `/openapi/latest` | viewer | Most recent snapshot |
+| `POST` | `/postman` | editor | Import a Postman Collection v2.x export |
+| `POST` | `/curl` | editor | Import `curl` command lines |
 
-Lifecycle: `ACTIVE → DECLINING → IDLE → ZOMBIE → DEAD`. Reactivation is only possible from `ZOMBIE` or `DEAD`.
+All three converge on the same dedupe-by-`(org_id, method, path_template)`
+logic. Postman/curl path variables (`{{var}}`, `:var`) and concrete example
+values are templated to wildcards the same way OpenAPI's `{param}` is.
 
-### Alerts — `/api/alerts`
-
-| Method | Path | Min role | Description |
-|---|---|---|---|
-| `GET` | `` | viewer | List alerts; filter with `?acknowledged=false&severity=HIGH` |
-| `POST` | `/{id}/ack` | editor | Acknowledge alert |
-
-### Anomalies — `/api/anomalies`
+### Shadow, zombie, alerts, anomalies
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `GET` | `` | viewer | Traffic events scored above `ANOMALY_THRESHOLD` |
+| `GET` | `/api/shadow` | viewer | Shadow endpoints with risk scores |
+| `POST` | `/api/shadow/{id}/acknowledge` · `/add-to-registry` | editor | Review · promote to registered |
+| `GET` | `/api/zombie` · `/summary` | viewer | Lifecycle states and counts |
+| `POST` | `/api/zombie/{id}/retire` · `/reactivate` | editor | Retire · reactivate |
+| `GET` | `/api/alerts` | viewer | List alerts |
+| `GET` | `/api/alerts/stream` | viewer | SSE — **new** alerts only (no history replay); needs `ALLOW_QUERY_AUTH` |
+| `POST` | `/api/alerts/{id}/ack` · `/feedback` | editor | Acknowledge · label true/false positive |
+| `GET` | `/api/anomalies` | viewer | Events scored above `ANOMALY_THRESHOLD` |
+| `GET` | `/api/traffic/stream` | viewer | SSE live traffic feed; needs `ALLOW_QUERY_AUTH` |
 
-The ML engine uses an IsolationForest + LocalOutlierFactor ensemble. Features include: hour-of-day, day-of-week, status code, latency, body size, auth presence, path depth, HTTP method, whether the path is new, query parameter count, query string Shannon entropy, request size, and response size. A high `query_entropy` score is a strong signal for SQL injection or BOLA attack patterns.
+Shadow risk: `LOW` (read-only, <10 hits) → `CRITICAL` (write methods, ≥10 hits).
 
-### Live Traffic Stream — `/api/traffic`
+### ML models — `/api/ml-models`
 
 | Method | Path | Min role | Description |
 |---|---|---|---|
-| `GET` | `/stream` | viewer | Server-Sent Events — new events every 2 s, up to 25 per tick |
+| `GET` | `` | viewer | Version history: trained-at, sklearn version, sample count, active flag |
+| `POST` | `/{id}/activate` | owner | Roll back or forward to a version |
 
-Pass credentials via `?auth=Bearer+<jwt>` or `?auth=<api-key>` for SSE clients that cannot set headers:
+### Privacy and audit
 
-```javascript
-const es = new EventSource('/api/traffic/stream?auth=' + apiKey);
-es.onmessage = e => console.log(JSON.parse(e.data));
+| Method | Path | Min role | Description |
+|---|---|---|---|
+| `DELETE` | `/api/privacy/traffic-data?client_ip=&session_id=` | admin | Right-to-delete |
+| `GET` | `/api/audit` | admin | Keyset-paginated audit log |
+
+Audit pagination is cursor-based (no `OFFSET` scan): pass `?cursor_id=` from
+the previous response. Filters: `event_type`, `from_ts`, `to_ts`.
+
+### Anomaly detection
+
+An IsolationForest + LocalOutlierFactor ensemble, **one model per
+organization** (never trained across tenants), plus a **per-endpoint
+baseline** for any `(method, path template)` with ≥200 events in the window —
+a `GET /health` and a `POST /payments/transfer` have very different normal
+shapes, and one global model over both produces noise. Lower-volume endpoints
+fall back to the org model.
+
+Features: hour-of-day, day-of-week, status, latency, body size, auth
+presence, path depth, method, path novelty, query param count, query Shannon
+entropy, request/response size. High `query_entropy` is a strong SQL-injection
+and BOLA signal.
+
+Anomaly alerts carry `event_id` and an `explanation` — the top 3 features by
+z-score against the model's own baseline:
+
+```json
+{"explanation": [
+  {"feature": "query_entropy", "value": 5.1, "baseline_mean": 1.2, "z_score": 4.3}
+]}
 ```
 
-### OpenAPI Registry — `/api/registry`
+**Feedback loop.** Marking an alert `true_positive` excludes its event from
+the next retrain's normal baseline, so a confirmed attack isn't folded into
+"ordinary traffic". `false_positive` labels are recorded and surfaced but do
+**not** auto-retune sensitivity — that would let anyone with editor access on
+a compromised account silently suppress detections by mass-mislabeling. Treat
+a rising false-positive rate as a prompt for human review.
 
-| Method | Path | Min role | Description |
-|---|---|---|---|
-| `POST` | `/openapi` | editor | Upload OpenAPI spec (YAML) to define the documented endpoint set |
-| `GET` | `/openapi/latest` | viewer | Retrieve the most recently uploaded spec |
+Up to 5 versions are retained per org; `activate` is owner-gated because
+swapping the model that scores every request is weightier than acknowledging
+one alert. Activating a version that fails HMAC verification returns `422`.
 
-Uploading a spec registers all paths as "known endpoints". Traffic to paths not in the spec is classified as shadow traffic.
+---
 
-### Audit Log — `/api/audit`
+## Frontend
 
-| Method | Path | Min role | Description |
-|---|---|---|---|
-| `GET` | `` | admin | Keyset-paginated audit log |
+React + Vite + TypeScript + Tailwind, with Zustand for state and TanStack
+Query for server state. Built output is served by FastAPI in production.
 
-Uses cursor-based pagination — no `OFFSET` scan. Pass `?cursor_id=<next_cursor_id>` from the previous response to fetch the next page. `next_cursor_id` is `null` on the last page.
+| Page | Notes |
+|---|---|
+| Dashboard | Stat tiles, 30-day traffic trend, endpoint health mix; onboarding wizard on first run |
+| Alerts | Cards with severity/type; click opens a detail drawer with the feature explanation and feedback buttons |
+| Anomalies | Paginated table; row click opens the raw event plus its explanation |
+| Shadow / Zombie / Discovered / Idle | Inventory views with acknowledge, promote, retire, reactivate |
+| Connected APIs | Onboard by pasting a provider key — no spec needed |
+| Registry | Upload OpenAPI, Postman, or curl |
+| Members | Org switcher, join requests, role changes |
+| Users | Platform-admin-only account administration |
+| Live traffic | SSE feed |
+| Audit | Keyset-paginated log |
+
+**Real-time alerts.** `useAlertToasts` subscribes to `/api/alerts/stream`
+once from `Layout.tsx` — so toasts survive navigation rather than only firing
+while the Alerts page is open — and auto-dismisses after 8s.
+
+**Connecting an API by key.** The Registry assumes you can produce a spec for
+the API you want watched, which doesn't hold for a third-party API where all
+you have is a key. **Connected APIs** covers that case: pick Anthropic,
+OpenAI, Google Gemini or "custom", paste the key, and the endpoints for that
+provider are merged into the same `known_endpoints` inventory a spec upload
+would have produced (tagged `source="connection:<id>"`, so removing the
+connection removes exactly those endpoints again). Optionally the key is
+checked live against the provider with one read-only GET, and the result is
+shown as the connection's status.
+
+The key is encrypted at rest with Fernet — this is the only recoverable
+secret the app stores, since probing requires replaying it upstream. Set
+`ENCRYPTION_KEY` if you ever plan to rotate `SECRET_KEY`; without it the
+encryption key is derived from `SECRET_KEY` and rotating that means every
+saved provider key has to be re-entered. Responses only ever carry a masked
+prefix + last 4. Custom targets are restricted to HTTPS hosts that resolve to
+public addresses, so a connection can't be used to reach link-local metadata
+services or the internal network.
+
+**Onboarding.** Shown on the Dashboard only when an account has no
+endpoints, no shadow endpoints, and no traffic. Three steps, each marked done
+from the same `Stats` the Dashboard already polls; a "send demo traffic"
+button posts two synthetic events (one deliberately undocumented) so the
+detection loop is visible immediately. Dismissible and self-retiring.
+
+**Accessibility and mobile.** The sidebar collapses below `md` into a
+hamburger drawer with backdrop and auto-close on navigation. Icon-only
+buttons carry `aria-label`s; interactive rows and cards have visible focus
+rings. Shared components (`Badge`, `EmptyState`, `PageHeader`, `StatCard`)
+support dark mode.
+
+---
+
+## Scaling and deployment
+
+Setting `REDIS_URL` switches on three things at once
+([ADR 003](docs/adr/003-redis-streams-ingest-queue.md),
+[ADR 004](docs/adr/004-scheduler-leader-election.md)):
+
+1. **Ingest queue.** `/api/ingest/*` publishes to a Redis Stream and returns;
+   `app/worker.py` consumes via a consumer group. Failures retry up to 5
+   times then move to `apimonitor:ingest:dead`. Messages left pending by a
+   crashed consumer are reclaimed after 60s via `XAUTOCLAIM`.
+2. **Distributed rate limiting.** slowapi switches to shared Redis storage.
+3. **Scheduler leader election.** A Redis lock (`SET NX PX` + compare-and-set
+   renewal) ensures the write-side jobs — retrain, prune, rollup, idle-scan —
+   run on exactly one replica. The gauge-refresh job is deliberately *not*
+   gated: Prometheus scrapes each replica's `/metrics` independently, so
+   every replica must refresh its own in-process gauges.
+
+Ingest becomes eventually-consistent when queued: an accepted event may not
+be queryable for a moment.
+
+### Kubernetes
+
+`k8s/` holds plain manifests plus a `kustomization.yaml`
+([ADR 005](docs/adr/005-kubernetes-manifests-and-observability-stack.md)
+explains the choice over Helm):
 
 ```bash
-# First page (newest first)
-curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/audit?limit=25"
-# → {"items": [...], "next_cursor_id": 4750}
+kubectl create secret generic apimonitor-secrets \
+  --from-literal=DATABASE_URL=mysql+pymysql://... \
+  --from-literal=SECRET_KEY=$(openssl rand -base64 32) \
+  --from-literal=MONITOR_API_KEY=$(openssl rand -base64 32) \
+  --from-literal=ADMIN_PASSWORD=...
 
-# Next page
-curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/audit?cursor_id=4750&limit=25"
+kubectl apply -k k8s/
+
+kubectl delete job apimonitor-migrate --ignore-not-found
+kubectl apply -f k8s/migrate-job.yaml
 ```
 
-Filters: `?event_type=login_attempt`, `?from_ts=2024-01-01T00:00:00`, `?to_ts=2024-12-31T23:59:59`.
+Includes web and worker Deployments, a Service, an HPA (CPU-targeted), and a
+migration Job. `secret.example.yaml`, `ingress.example.yaml`, and
+`migrate-job.yaml` are excluded from the kustomization on purpose — the first
+two are templates, and Job specs are immutable so re-applying is a silent
+no-op without deleting first.
+
+The bundled `redis.yaml` is a convenience default with **no persistence**;
+point `REDIS_URL` at managed Redis for anything beyond dev.
+
+### CI/CD
+
+`ci.yml` runs lint, type-check, backend tests (against a real MySQL service
+container), frontend tests, and a security-scan job: `bandit` (blocking),
+`pip-audit` and `safety` (informational), `npm audit` on production deps
+(blocking), Semgrep, and Trivy on the built image (CRITICAL+fixed = blocking).
+
+`cd.yml` builds and pushes to GHCR after CI passes on `main`, then runs
+migrations and rolls out, gated behind a `production` GitHub Environment.
 
 ---
 
 ## Observability
 
-### Prometheus metrics (`GET /metrics`)
+### Metrics — `GET /metrics`
 
-Exposed by FastAPI, restricted to `127.0.0.1` by nginx. Scraped by the bundled Prometheus container every 15 s.
+Restricted to internal networks by nginx; Prometheus authenticates with
+`MONITOR_API_KEY`.
 
-Key gauges: `apimonitor_open_alerts`, `apimonitor_shadow_endpoints`, `apimonitor_zombie_endpoints`, `apimonitor_events_last_hour`, `apimonitor_known_endpoints`.
+Key series: `apimonitor_open_alerts`, `active_alerts_total{severity}`,
+`shadow_apis_detected_total`, `zombie_apis_total{status}`,
+`apimonitor_events_ingested_total{gateway}`, `apimonitor_anomaly_events_total`,
+`apimonitor_ml_last_retrain_timestamp`, `apimonitor_ingest_queue_depth`,
+`apimonitor_ingest_queue_dead_letter_total`, and
+`apimonitor_request_duration_seconds` (a Histogram — the older
+`api_request_duration_seconds` is a Counter and can only yield an average).
 
-### Grafana dashboards
+### Alerting
 
-Pre-provisioned dashboards are loaded from `grafana/dashboards/` on startup. Access at http://localhost:3000. Login with the `GRAFANA_ADMIN_PASSWORD` value from `.env`.
+`prometheus/alert_rules.yml` covers: too many open high-severity alerts, a
+stalled ingest pipeline, ML retrain not succeeding for 2h, a growing queue
+backlog or dead-letter stream, and p95 latency above threshold.
 
-### Structured audit log
+Alertmanager routes `severity=critical` to a faster-repeating receiver. The
+receiver URL comes from `ALERT_WEBHOOK_URL`, defaulting to a local no-op sink
+so the stack starts clean and alerts remain visible in the UI on :9093. Point
+it at a Slack incoming webhook, PagerDuty, or an internal endpoint to be paged.
 
-The `audit` Python logger emits one JSON line per security event to container stdout. In Docker:
+### Tracing
+
+`app/tracing.py` instruments FastAPI and SQLAlchemy. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` to export (bundled Jaeger listens on
+`http://jaeger:4318`, UI on :16686). Unset, spans are created and dropped —
+no connection-error noise without a collector.
+
+### Logs
+
+The `audit` logger emits one JSON line per security event to stdout:
 
 ```bash
 docker compose logs -f web | grep '"audit":true'
 ```
 
-In Kubernetes, stdout is captured by the node log driver and forwarded to your log aggregation pipeline.
+Promtail ships all container logs to Loki, provisioned as a Grafana
+datasource so logs are searchable next to metrics.
 
 ---
 
-## Running Tests
+## Data retention and privacy
 
-The full test suite uses SQLite in-memory databases — no running MySQL instance is required.
+Full policy: [`docs/data-retention-policy.md`](docs/data-retention-policy.md).
+
+- **Redaction before storage.** Query parameters named `token`, `password`,
+  `api_key`, `auth`, `session`, `jwt`, `secret`, and similar have their
+  *values* replaced with `REDACTED` before a `TrafficEvent` row is written —
+  so redacted paths are what reach the database, ML scoring, and alert text.
+  Request and response **bodies are never captured**.
+- **Retention.** Raw `traffic_events` are kept 30 days, then aggregated into
+  `traffic_daily_summary` and deleted. Refresh tokens are pruned once expired
+  (or 30 days after revocation). Summaries and alerts are kept indefinitely.
+- **Right to delete.** `DELETE /api/privacy/traffic-data` purges every
+  captured event matching an IP and/or session id, in chunks, audit-logged.
+  `traffic_events` is the only table carrying those identifiers, so this
+  covers the full footprint.
+- **Audit log is exempt** — deliberately. It records *who did what*,
+  including deletion requests themselves; letting it be erased by the same
+  action would destroy the evidence of that action.
+
+### Backup and restore
+
+The database is the only source of truth for the endpoint inventory, alert
+history and the audit log. None of it can be reconstructed from traffic once
+it is gone, and retention pruning is not a backup — it deletes.
 
 ```bash
-# Full suite with coverage enforcement
-python -m pytest
-
-# Single file without coverage threshold
-python -m pytest tests/test_refresh_token_flow.py -v --no-cov
-
-# Filter by test name
-python -m pytest -k "test_replay_attack or test_anomaly" -v --no-cov
+./scripts/backup_db.sh backup                    # timestamped dump into ./backups
+./scripts/backup_db.sh verify backups/<file>     # load it into a scratch DB and count rows
+./scripts/backup_db.sh restore backups/<file>    # overwrite the live DB (prompts to confirm)
 ```
 
-### Test coverage areas
+Works against both MySQL and SQLite, reading `DATABASE_URL` from the
+environment or `.env`. Dumps land in `./backups`, which is gitignored — they
+contain password hashes and the full audit log, so treat them as secrets and
+store them off-host.
 
-| File | What it tests |
+Two things worth doing rather than assuming:
+
+- **Schedule `backup` and ship the output off the machine.** A dump on the
+  same disk as the database does not survive the failure you are insuring
+  against.
+- **Run `verify` on a real dump periodically.** A backup nobody has restored
+  is a hypothesis. `verify` loads the dump into a throwaway database and
+  counts rows, so it can run against production dumps without touching
+  production.
+
+If a restored dump predates a schema change, run `alembic upgrade head`
+afterwards.
+
+### Starting a tenant from clean
+
+An instance used for demos or e2e runs carries synthetic endpoints and alerts
+that would show up as findings against a real organization's traffic.
+`scripts/reset_data.py` clears operational data while keeping accounts and
+organizations:
+
+```bash
+python scripts/reset_data.py --dry-run              # report what would go
+python scripts/reset_data.py --yes                  # traffic, inventory, alerts, connections
+python scripts/reset_data.py --yes --test-users --audit   # also e2e_* accounts and the audit log
+```
+
+---
+
+## Testing
+
+```bash
+python -m pytest                 # backend (364 tests, SQLite in-memory)
+cd frontend && npm test          # frontend unit/component (30 tests, vitest)
+cd frontend && npm run test:e2e  # Playwright — needs a running backend
+```
+
+No MySQL is required for the backend suite. Redis-dependent tests use
+`fakeredis` (with its `lua` extra for the leader-election scripts).
+
+| Area | Files |
 |---|---|
-| `test_refresh_token_flow.py` | Token rotation, replay-attack prevention, logout, expired/revoked token rejection |
-| `test_rate_limiting_integration.py` | 429 response format, per-IP quota, limit value verification |
-| `test_validation_errors.py` | Pydantic schema boundaries for all auth and action schemas |
-| `test_anomaly_edge_cases.py` | Score range, degenerate inputs, feature capping, `train_from_db` boundary |
-| `test_ml_features.py` | Feature extraction: entropy, query param count, size fields |
-| `test_schema_hardening.py` | `extra="forbid"`, path/IP length constraints on ingest schemas |
-| `test_audit_logging.py` | Dual-sink (DB + stdout JSON) correctness and timestamp consistency |
-| `test_cursor_pagination.py` | Keyset pagination walk, no-offset verification, composite index declaration |
-| `test_traffic_pruning.py` | Chunked stale traffic deletion, age cutoffs |
-| `test_secrets_dir.py` | `/run/secrets/` file loading, env var precedence, missing dir graceful handling |
-| `test_anomaly_threshold.py` | `ANOMALY_THRESHOLD` env var override, boundary conditions |
+| Auth and sessions | `test_refresh_token_flow`, `test_login_lockout`, `test_password_reset`, `test_mfa`, `test_api_keys` |
+| Multi-tenancy | `test_org_context`, `test_orgs`, `test_default_organization`, `test_org_data_isolation` |
+| ML | `test_ml_versioning`, `test_ml_features`, `test_anomaly_edge_cases`, `test_anomaly_threshold` |
+| Ingestion | `test_ingest_queue`, `test_registry_import_formats`, `test_traffic_pruning`, `test_schema_hardening` |
+| Data layer | `test_traffic_trend`, `test_cursor_pagination`, `test_db_pool_settings` |
+| Infrastructure | `test_leader_election`, `test_distributed_rate_limiting`, `test_tracing`, `test_alerts_stream` |
+| Privacy and audit | `test_pii_redaction`, `test_traffic_deletion`, `test_audit_logging` |
+| Config and secrets | `test_secrets_provider`, `test_secrets_dir`, `test_validation_errors`, `test_rate_limiting` |
+
+**Playwright e2e** (`frontend/e2e/`) covers login, registration, logout, the
+admin-only Users gate as both admin and viewer, and three CRUD flows (alert
+acknowledge, shadow acknowledge, zombie retire). Requires a running backend
+against a migrated database — see [`frontend/e2e/README.md`](frontend/e2e/README.md).
+
+**Load testing** (`loadtest/`) — a Locust suite with measured baselines, plus
+k6 scripts. See [`loadtest/README.md`](loadtest/README.md) for numbers and,
+importantly, what they do and don't tell you.
+
+---
+
+## Project layout
+
+```
+app/
+  main.py            FastAPI app, lifespan, middleware
+  models.py          SQLAlchemy models
+  config.py          Settings (env → .env → secrets manager → /run/secrets)
+  deps.py            Auth and RBAC dependencies
+  security.py        Hashing, JWT, TOTP, role enums
+  tracing.py         OpenTelemetry setup
+  worker.py          Redis Streams ingest consumer
+  routers/           One module per resource
+  services/          Business logic, ML, parsers, queue, leader election
+  jobs/scheduler.py  Background jobs
+alembic/             Migrations
+frontend/            React SPA (src/, e2e/)
+k8s/                 Kubernetes manifests + kustomization
+loadtest/            Locust and k6 scripts
+docs/adr/            Architecture decision records
+tests/               Backend test suite
+nginx/ prometheus/ alertmanager/ grafana/ loki/ promtail/   Infra config
+```
+
+### Architecture decision records
+
+| ADR | Topic |
+|---|---|
+| [001](docs/adr/001-alembic-migration-strategy.md) | Alembic migration strategy |
+| [002](docs/adr/002-multi-tenancy-schema.md) | Multi-tenancy schema and the two-axis role model |
+| [003](docs/adr/003-redis-streams-ingest-queue.md) | Redis Streams for the ingest queue |
+| [004](docs/adr/004-scheduler-leader-election.md) | Scheduler leader election |
+| [005](docs/adr/005-kubernetes-manifests-and-observability-stack.md) | Plain K8s manifests; observability integration points |
+
+---
+
+## Known limitations
+
+Consolidated so they're findable rather than scattered. These are deliberate
+scope decisions or genuinely unverified areas — not unknown bugs.
+
+**Unverified in the environment this was built in**
+
+- **Kubernetes manifests have never been applied to a live cluster.**
+  `kubectl kustomize k8s/` confirms they *render*; that is strictly weaker
+  than confirming they *run*.
+- **The CD workflow has never executed.** It needs a `production` GitHub
+  Environment with required reviewers and a `KUBE_CONFIG_PRODUCTION` secret —
+  repo-settings and cluster-access decisions a workflow file can't make for
+  itself. `build-and-push` works standalone; `deploy-production` fails at the
+  kubeconfig step until configured.
+- **Load-test numbers were measured against SQLite, not MySQL**, in
+  synchronous (unqueued) mode. They characterize SQLite's single-writer lock
+  more than the application. Do not quote them as production figures — see
+  [`loadtest/README.md`](loadtest/README.md).
+- **The k6 scripts have never been run** (no k6 binary available). The Locust
+  suite has.
+- **Promtail's log shipping is untested on Docker Desktop.** It mounts
+  `/var/lib/docker/containers`, which only exists on a native Linux Docker
+  host. Use Loki's Docker driver plugin on Desktop, or a DaemonSet shipper in
+  Kubernetes.
+
+**Deliberately not implemented**
+
+- **Table partitioning** for `traffic_events` / `audit_log`. MySQL
+  `PARTITION BY RANGE` isn't expressible through Alembic's portable helpers
+  (it needs raw `op.execute()`), and there was no live MySQL to verify
+  partition-management DDL against. The pruning jobs already delete in
+  bounded chunks to avoid long locks, so this is an optimization, not a
+  correctness gap.
+- **GraphQL introspection and gRPC/protobuf reflection** import. Both need
+  materially different machinery than the three text-format parsers (a live
+  call to a target service; binary descriptor parsing) and warrant their own
+  pass.
+- **Trace context does not propagate across the Redis queue.** The HTTP hop
+  and the worker hop are each traced, but as separate traces. Closing this
+  means injecting trace context into the message payload and extracting it on
+  consume.
+- **No email delivery** for password reset — tokens go to the application log.
+- **Per-page dark-mode audit.** Shared components support dark mode; several
+  individual pages still have hard-coded light-mode classes. A full WCAG
+  contrast and screen-reader pass has not been done.
+- **Playwright e2e is not wired into CI** — it needs a migrated database
+  provisioned as a CI step, similar to `test-backend`'s MySQL service.

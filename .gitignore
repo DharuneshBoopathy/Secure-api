@@ -1,13 +1,48 @@
+# Secrets / local env
 .env
+
+# Python
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-*.pcap
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Editor / tooling
 .idea/
 .vscode/
+.claude/
+.cursor/
+
+# Runtime artifacts
+*.pcap
 nginx/logs/
+*.db
+# Timestamped copies from scripts/reset_data.py and manual backups. `*.db`
+# does not match `*.db.bak-2026...`, and these hold real password hashes and
+# encrypted provider credentials.
+*.db.bak*
+*.db-journal
+*.sqlite
+*.sqlite3
+# Database dumps from scripts/backup_db.sh — full copies of every table,
+# including password hashes and the audit log.
+/backups/
+*.sql.gz
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/e2e/.auth/
+
+# Load-test output
+loadtest/results/

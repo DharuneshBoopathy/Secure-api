@@ -11,23 +11,24 @@ from app.services.pathutil import is_documented, normalize_path_for_discovery
 from app.security import utc_now
 
 
-def get_known_templates(db: Session) -> list[tuple[str, str]]:
-    rows = db.query(KnownEndpoint).all()
+def get_known_templates(db: Session, org_id: int) -> list[tuple[str, str]]:
+    rows = db.query(KnownEndpoint).filter(KnownEndpoint.org_id == org_id).all()
     return [(r.method, r.path_template) for r in rows]
 
 
-def touch_known_endpoint_usage(db: Session, method: str, path: str) -> None:
+def touch_known_endpoint_usage(db: Session, org_id: int, method: str, path: str) -> None:
     """Update last_traffic_at for matching OpenAPI path templates."""
     m = method.upper()
-    for row in db.query(KnownEndpoint).filter(KnownEndpoint.method == m).all():
+    for row in db.query(KnownEndpoint).filter(KnownEndpoint.org_id == org_id, KnownEndpoint.method == m).all():
         if is_documented(method, path, [(row.method, row.path_template)]):
             row.last_traffic_at = utc_now()
 
 
-def upsert_discovered(db: Session, method: str, path_normalized: str, *, documented: bool) -> None:
+def upsert_discovered(db: Session, org_id: int, method: str, path_normalized: str, *, documented: bool) -> None:
     row = (
         db.query(DiscoveredEndpoint)
         .filter(
+            DiscoveredEndpoint.org_id == org_id,
             DiscoveredEndpoint.method == method,
             DiscoveredEndpoint.path_normalized == path_normalized,
         )
@@ -41,6 +42,7 @@ def upsert_discovered(db: Session, method: str, path_normalized: str, *, documen
     else:
         db.add(
             DiscoveredEndpoint(
+                org_id=org_id,
                 method=method,
                 path_normalized=path_normalized,
                 first_seen=now,
@@ -67,6 +69,7 @@ def _shadow_risk(method: str, hit_count: int, auth_present: bool) -> tuple[int, 
 def upsert_shadow_endpoint(
     db: Session,
     *,
+    org_id: int,
     method: str,
     path: str,
     client_ip: str | None,
@@ -76,13 +79,14 @@ def upsert_shadow_endpoint(
     norm = normalize_path_for_discovery(path)
     row = (
         db.query(ShadowEndpoint)
-        .filter(ShadowEndpoint.method == method, ShadowEndpoint.path_normalized == norm)
+        .filter(ShadowEndpoint.org_id == org_id, ShadowEndpoint.method == method, ShadowEndpoint.path_normalized == norm)
         .one_or_none()
     )
     now = utc_now()
     if row is None:
         score, level = _shadow_risk(method, 1, auth_present)
         row = ShadowEndpoint(
+            org_id=org_id,
             method=method,
             path_normalized=norm,
             first_seen=now,
@@ -114,9 +118,9 @@ def upsert_shadow_endpoint(
     return row
 
 
-def recompute_discovered_documented_flags(db: Session) -> None:
-    templates = get_known_templates(db)
-    for d in db.query(DiscoveredEndpoint).all():
+def recompute_discovered_documented_flags(db: Session, org_id: int) -> None:
+    templates = get_known_templates(db, org_id)
+    for d in db.query(DiscoveredEndpoint).filter(DiscoveredEndpoint.org_id == org_id).all():
         d.documented = is_documented(d.method, d.path_normalized, templates)
     db.commit()
 
@@ -158,9 +162,9 @@ def _classify_zombie_status(
     return "ACTIVE"
 
 
-def recompute_zombie_states(db: Session) -> int:
+def recompute_zombie_states(db: Session, org_id: int) -> int:
     """
-    Recompute all zombie states.
+    Recompute zombie states for one organization.
 
     Performance fix: load only documented=True events within the 30-day window
     once, then match against each endpoint template.  This replaces the prior
@@ -172,10 +176,10 @@ def recompute_zombie_states(db: Session) -> int:
     d14 = now - timedelta(days=14)
     d30 = now - timedelta(days=max(30, settings.zombie_window_days))
 
-    # Single SQL query — only documented events in the look-back window.
+    # Single SQL query — only documented events in the look-back window, for this org.
     recent = (
         db.query(TrafficEvent.ts, TrafficEvent.method, TrafficEvent.path)
-        .filter(TrafficEvent.is_documented.is_(True), TrafficEvent.ts >= d30)
+        .filter(TrafficEvent.org_id == org_id, TrafficEvent.is_documented.is_(True), TrafficEvent.ts >= d30)
         .all()
     )
 
@@ -186,7 +190,7 @@ def recompute_zombie_states(db: Session) -> int:
         path_ts[(row.method.upper(), row.path)].append(row.ts)
 
     touched = 0
-    for endpoint in db.query(KnownEndpoint).all():
+    for endpoint in db.query(KnownEndpoint).filter(KnownEndpoint.org_id == org_id).all():
         method = endpoint.method.upper()
         tmpl = endpoint.path_template
 
@@ -203,11 +207,15 @@ def recompute_zombie_states(db: Session) -> int:
 
         state = (
             db.query(ZombieEndpointState)
-            .filter(ZombieEndpointState.method == method, ZombieEndpointState.path_template == tmpl)
+            .filter(
+                ZombieEndpointState.org_id == org_id,
+                ZombieEndpointState.method == method,
+                ZombieEndpointState.path_template == tmpl,
+            )
             .one_or_none()
         )
         if state is None:
-            state = ZombieEndpointState(method=method, path_template=tmpl)
+            state = ZombieEndpointState(org_id=org_id, method=method, path_template=tmpl)
             db.add(state)
 
         if not state.retired:
@@ -237,6 +245,7 @@ def recompute_single_zombie_state(db: Session, state: ZombieEndpointState) -> No
     rows = (
         db.query(TrafficEvent.ts, TrafficEvent.path)
         .filter(
+            TrafficEvent.org_id == state.org_id,
             TrafficEvent.method == method,
             TrafficEvent.is_documented.is_(True),
             TrafficEvent.ts >= d30,
@@ -261,16 +270,17 @@ def recompute_single_zombie_state(db: Session, state: ZombieEndpointState) -> No
     db.commit()
 
 
-def scan_idle_documented_endpoints(db: Session) -> int:
+def scan_idle_documented_endpoints(db: Session, org_id: int) -> int:
     """Registered APIs with no hits in the idle window (shadow retirement / misconfig)."""
     settings = get_settings()
     cutoff = utc_now() - timedelta(hours=settings.idle_threshold_hours)
     count = 0
-    for row in db.query(KnownEndpoint).all():
+    for row in db.query(KnownEndpoint).filter(KnownEndpoint.org_id == org_id).all():
         if row.last_traffic_at is None or row.last_traffic_at < cutoff:
             count += 1
             if not recent_duplicate(
                 db,
+                org_id=org_id,
                 alert_type="idle_documented_endpoint",
                 method=row.method,
                 path=row.path_template[:1024],
@@ -278,6 +288,7 @@ def scan_idle_documented_endpoints(db: Session) -> int:
             ):
                 db.add(
                     Alert(
+                        org_id=org_id,
                         alert_type="idle_documented_endpoint",
                         severity="low",
                         title="Registered API path idle",

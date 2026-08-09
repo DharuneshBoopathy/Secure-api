@@ -5,12 +5,16 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>API Security Monitor</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap"
-      rel="stylesheet"
-    />
+    <!--
+      No web-font <link> here on purpose. The app's own CSP
+      (app/main.py: style-src 'self' 'unsafe-inline') blocks third-party
+      stylesheets, so a Google Fonts link was silently failing and the UI
+      fell back to system fonts anyway. Rather than widen the CSP, the font
+      stack in tailwind.config.js uses locally-available faces: it keeps the
+      policy tight, drops a third-party runtime dependency (and the request
+      that sends every user's IP to Google), and works in the air-gapped
+      environments a self-hosted security tool is often deployed into.
+    -->
   </head>
   <body class="antialiased">
     <div id="root"></div>

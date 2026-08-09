@@ -1,4 +1,4 @@
-from prometheus_client import Counter, Gauge, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 EVENTS_INGESTED = Counter(
     "apimonitor_events_ingested_total",
@@ -52,6 +52,28 @@ ACTIVE_ALERTS_TOTAL = Gauge(
     "active_alerts_total",
     "Open alerts by severity",
     ["severity"],
+)
+# api_request_duration_seconds (above) is a Counter — good for an average via
+# rate(), but has no bucket data, so p95/p99 SLO dashboards/alerts can't be
+# built from it. This Histogram fills that gap. Deliberately unlabeled by
+# path (unlike the counter above) to avoid unbounded label cardinality on a
+# metric that fans out into 10+ time series per label combination already.
+REQUEST_DURATION_HISTOGRAM = Histogram(
+    "apimonitor_request_duration_seconds",
+    "Request duration in seconds (global, for p50/p95/p99 SLO dashboards and alerting)",
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10),
+)
+ML_LAST_RETRAIN_TIMESTAMP = Gauge(
+    "apimonitor_ml_last_retrain_timestamp",
+    "Unix timestamp of the last successful ML retrain pass (across all orgs)",
+)
+INGEST_QUEUE_DEPTH = Gauge(
+    "apimonitor_ingest_queue_depth",
+    "Pending entries in the Redis ingest stream (0 / absent when queueing is disabled)",
+)
+INGEST_QUEUE_DEAD_LETTER_TOTAL = Counter(
+    "apimonitor_ingest_queue_dead_letter_total",
+    "Ingest events moved to the dead-letter stream after repeated processing failures",
 )
 
 

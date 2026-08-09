@@ -14,13 +14,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt ruff mypy
+      # The lockfile is what actually ships (Dockerfile installs from it), so
+      # a requirements.txt edit that never made it into the lock would be a
+      # change nobody deploys. Recompiling and diffing catches that drift.
+      - name: Verify requirements.lock is up to date
+        run: |
+          pipx run uv pip compile requirements.txt --generate-hashes \
+            --python-version 3.12 -o /tmp/requirements.check
+          diff <(grep -v '^#' requirements.lock) <(grep -v '^#' /tmp/requirements.check) \
+            || { echo "::error::requirements.lock is stale — re-run: uv pip compile requirements.txt --generate-hashes --python-version 3.12 -o requirements.lock"; exit 1; }
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install ruff mypy
       - run: ruff check app
       - run: mypy app --ignore-missing-imports
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - run: npm ci
+        working-directory: frontend
+      # Errors gate the build; the pre-existing warnings are visible in the
+      # log without blocking. See eslint.config.js for which is which.
+      - run: npm run lint:ci
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
@@ -46,7 +60,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt pytest pytest-cov pytest-asyncio httpx faker
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install pytest pytest-cov pytest-asyncio httpx faker "fakeredis[lua]"
       - run: pytest
 
   test-frontend:
@@ -68,25 +83,67 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt bandit safety
+      - run: pip install --require-hashes -r requirements.lock
+      - run: pip install bandit safety pip-audit
       - run: bandit -r app
       - run: safety check || true
+      # pip-audit checks the resolved environment against the PyPI/OSV
+      # advisory databases. Direct deps with known-CVE floors (PyJWT,
+      # python-multipart) have already been bumped in requirements.txt, but
+      # several *transitive* deps pulled in via fastapi[standard] /
+      # pydantic-settings (starlette, cryptography, urllib3, idna) still
+      # resolve to versions with open advisories as of this writing. Left
+      # informational until those floors are raised too — flip to blocking
+      # (drop `|| true`) once a clean run is confirmed.
+      - run: pip-audit || true
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
       - run: npm ci
         working-directory: frontend
-      - run: npm audit --audit-level=moderate || true
+      # Blocking gate: production dependencies only, high/critical severity.
+      # Dev-only tooling (vite/vitest/esbuild, etc.) never ships in the built
+      # bundle, so it's scanned informationally below instead of gating CI.
+      - run: npm audit --omit=dev --audit-level=high
         working-directory: frontend
+      - run: npm audit --audit-level=high || true
+        working-directory: frontend
+
+  # SAST across both app/ (Python) and frontend/src (TS/React) via Semgrep's
+  # public OSS registry rules — no Semgrep Cloud account/token required.
+  # Informational for now (continue-on-error) — no baseline triage of
+  # findings has been done yet; drop continue-on-error once that's complete.
+  semgrep-sast:
+    name: semgrep-oss/scan
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: semgrep scan --config p/ci
 
   docker-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t secure-api-monitor:ci .
+      # Informational: full severity range, visible in the job log, never blocks.
       - uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: secure-api-monitor:ci
           format: table
           exit-code: "0"
           severity: CRITICAL,HIGH
+      # Blocking gate: CRITICAL only, and only CVEs with an available fix —
+      # unfixed base-image CVEs would otherwise block every merge with no
+      # action the team can take. Not verified locally (no Docker daemon in
+      # this environment) — watch the first run and adjust severity/ignore
+      # rules if it surfaces something that isn't actionable.
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: secure-api-monitor:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL
+          ignore-unfixed: true

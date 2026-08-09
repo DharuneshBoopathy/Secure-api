@@ -2,24 +2,25 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deps import require_role
+from app.deps import OrgContext, get_current_user, require_org_role
 from app.models import KnownEndpoint, ShadowEndpoint, User
 from app.schemas import ShadowAcknowledgeIn, ShadowOut
-from app.security import Role, utc_now
+from app.security import OrgRole, utc_now
 from app.services.audit_service import log_audit_event
 
 router = APIRouter(prefix="/shadow", tags=["shadow"])
 
 
-@router.get("", dependencies=[Depends(require_role(Role.VIEWER))])
+@router.get("")
 def list_shadow(
+    ctx: OrgContext = Depends(require_org_role(OrgRole.VIEWER)),
     db: Session = Depends(get_db),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     risk_level: str | None = None,
     sort_by: str = Query(default="risk_score"),
 ) -> dict:
-    q = db.query(ShadowEndpoint)
+    q = db.query(ShadowEndpoint).filter(ShadowEndpoint.org_id == ctx.org_id)
     if risk_level:
         q = q.filter(ShadowEndpoint.risk_level == risk_level.upper())
     if sort_by == "hit_count":
@@ -36,10 +37,11 @@ def acknowledge_shadow(
     shadow_id: int,
     body: ShadowAcknowledgeIn,
     request: Request,
-    current_user: User = Depends(require_role(Role.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_role(OrgRole.EDITOR)),
     db: Session = Depends(get_db),
 ) -> dict:
-    row = db.query(ShadowEndpoint).filter(ShadowEndpoint.id == shadow_id).one_or_none()
+    row = db.query(ShadowEndpoint).filter(ShadowEndpoint.id == shadow_id, ShadowEndpoint.org_id == ctx.org_id).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Shadow endpoint not found")
     row.acknowledged = True
@@ -63,19 +65,28 @@ def acknowledge_shadow(
 def add_shadow_to_registry(
     shadow_id: int,
     request: Request,
-    current_user: User = Depends(require_role(Role.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_role(OrgRole.EDITOR)),
     db: Session = Depends(get_db),
 ) -> dict:
-    row = db.query(ShadowEndpoint).filter(ShadowEndpoint.id == shadow_id).one_or_none()
+    row = db.query(ShadowEndpoint).filter(ShadowEndpoint.id == shadow_id, ShadowEndpoint.org_id == ctx.org_id).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Shadow endpoint not found")
     exists = (
         db.query(KnownEndpoint)
-        .filter(KnownEndpoint.method == row.method, KnownEndpoint.path_template == row.path_normalized)
+        .filter(
+            KnownEndpoint.org_id == ctx.org_id,
+            KnownEndpoint.method == row.method,
+            KnownEndpoint.path_template == row.path_normalized,
+        )
         .one_or_none()
     )
     if exists is None:
-        db.add(KnownEndpoint(method=row.method, path_template=row.path_normalized, source="shadow_promotion"))
+        db.add(
+            KnownEndpoint(
+                org_id=ctx.org_id, method=row.method, path_template=row.path_normalized, source="shadow_promotion"
+            )
+        )
     row.acknowledged = True
     row.acknowledged_reason = "Promoted to registry"
     row.acknowledged_at = utc_now()

@@ -1,4 +1,4 @@
-.PHONY: setup up down dev build-frontend test clean reset-env logs
+.PHONY: setup up down dev build-frontend test clean reset-env logs migrate
 
 # -----------------------------------------------------------------------------
 # One-command onboarding:
@@ -22,7 +22,13 @@ dev: setup
 	@echo ""
 	@echo "Dependencies started. Now run the API locally:"
 	@echo "  pip install -r requirements.txt"
+	@echo "  make migrate"
 	@echo "  uvicorn app.main:app --reload --host 127.0.0.1 --port 8000"
+
+# Apply pending Alembic migrations. Schema is owned by alembic/ — the app
+# itself no longer runs create_all() at startup (see docs/adr/001).
+migrate:
+	$(PY) -m alembic upgrade head
 
 # Build the frontend SPA (served by FastAPI when present).
 build-frontend:
@@ -46,4 +52,4 @@ logs:
 
 # Remove build artefacts + containers + volumes (destructive).
 clean: down
-	docker volume rm apimonitor_mysql grafana_data 2>/dev/null || true
+	docker volume rm apimonitor_mysql grafana_data apimonitor_loki 2>/dev/null || true

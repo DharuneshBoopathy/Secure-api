@@ -3,17 +3,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.deps import require_role
+from app.deps import OrgContext, get_current_user, require_org_role
 from app.models import User, ZombieEndpointState
 from app.schemas import ZombieActionIn, ZombieOut
-from app.security import Role, utc_now
+from app.security import OrgRole, utc_now
 from app.services.audit_service import log_audit_event
 
 router = APIRouter(prefix="/zombie", tags=["zombie"])
 
 
-@router.get("", dependencies=[Depends(require_role(Role.VIEWER))])
+@router.get("")
 def list_zombie(
+    ctx: OrgContext = Depends(require_org_role(OrgRole.VIEWER)),
     db: Session = Depends(get_db),
     status: str | None = None,
     risk_level: str | None = None,
@@ -24,7 +25,7 @@ def list_zombie(
     Read from the pre-computed ZombieEndpointState cache.
     Recomputation runs every 30 min via APScheduler — NOT on every GET request.
     """
-    q = db.query(ZombieEndpointState)
+    q = db.query(ZombieEndpointState).filter(ZombieEndpointState.org_id == ctx.org_id)
     if status:
         q = q.filter(ZombieEndpointState.status == status.upper())
     if risk_level:
@@ -39,10 +40,11 @@ def list_zombie(
     return {"items": [ZombieOut.model_validate(r) for r in rows], "total": total, "page": page, "page_size": page_size}
 
 
-@router.get("/summary", dependencies=[Depends(require_role(Role.VIEWER))])
-def zombie_summary(db: Session = Depends(get_db)) -> dict:
+@router.get("/summary")
+def zombie_summary(ctx: OrgContext = Depends(require_org_role(OrgRole.VIEWER)), db: Session = Depends(get_db)) -> dict:
     rows = (
         db.query(ZombieEndpointState.status, func.count(ZombieEndpointState.id))
+        .filter(ZombieEndpointState.org_id == ctx.org_id)
         .group_by(ZombieEndpointState.status)
         .all()
     )
@@ -54,10 +56,15 @@ def retire_zombie(
     state_id: int,
     body: ZombieActionIn,
     request: Request,
-    current_user: User = Depends(require_role(Role.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_role(OrgRole.EDITOR)),
     db: Session = Depends(get_db),
 ) -> dict:
-    row = db.query(ZombieEndpointState).filter(ZombieEndpointState.id == state_id).one_or_none()
+    row = (
+        db.query(ZombieEndpointState)
+        .filter(ZombieEndpointState.id == state_id, ZombieEndpointState.org_id == ctx.org_id)
+        .one_or_none()
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="Zombie endpoint state not found")
     row.retired = True
@@ -82,10 +89,15 @@ def retire_zombie(
 def reactivate_zombie(
     state_id: int,
     request: Request,
-    current_user: User = Depends(require_role(Role.EDITOR)),
+    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(require_org_role(OrgRole.EDITOR)),
     db: Session = Depends(get_db),
 ) -> dict:
-    row = db.query(ZombieEndpointState).filter(ZombieEndpointState.id == state_id).one_or_none()
+    row = (
+        db.query(ZombieEndpointState)
+        .filter(ZombieEndpointState.id == state_id, ZombieEndpointState.org_id == ctx.org_id)
+        .one_or_none()
+    )
     if row is None:
         raise HTTPException(status_code=404, detail="Zombie endpoint state not found")
     row.retired = False

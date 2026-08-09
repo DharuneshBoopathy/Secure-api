@@ -56,8 +56,21 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Required — set ADMIN_PASSWORD in .env}
       CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # Decouples /api/ingest/* from the request path (app/worker.py
+      # consumes it) and gives slowapi a shared rate-limit backend so
+      # limits are correct once you run more than one `web` replica. Unset
+      # (or delete the `redis`/`worker` services below) to fall back to the
+      # pre-Phase-4 synchronous-ingest / in-memory-rate-limit behavior.
+      REDIS_URL: redis://redis:6379/0
+      # See app/tracing.py — unset (or delete the `jaeger` service) for
+      # no-exporter tracing (spans still created, just dropped, no
+      # connection-error log spam).
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: apimonitor-web
     depends_on:
       mysql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request as r; r.urlopen('http://localhost:8000/health')"]
@@ -69,6 +82,95 @@ services:
         limits:
           cpus: "1.00"
           memory: 1G
+
+  worker:
+    build: .
+    container_name: apimonitor-worker
+    restart: unless-stopped
+    # Runs its own `alembic upgrade head` rather than assuming `web` won its
+    # race to migrate first — idempotent (Alembic no-ops once at head), so
+    # startup order between the two containers doesn't matter.
+    command: ["sh", "-c", "alembic upgrade head && python -m app.worker"]
+    environment:
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: mysql+pymysql://apimonitor:${MYSQL_PASSWORD}@mysql:3306/apimonitor
+      MONITOR_API_KEY: ${MONITOR_API_KEY:?Required — set MONITOR_API_KEY in .env (min 32 random chars)}
+      SECRET_KEY: ${SECRET_KEY:?Required — set SECRET_KEY in .env (min 32 random chars)}
+      REDIS_URL: redis://redis:6379/0
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_SERVICE_NAME: apimonitor-worker
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.00"
+          memory: 512M
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: apimonitor-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # Jaeger UI
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  redis:
+    image: redis:7-alpine
+    container_name: apimonitor-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: apimonitor-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - apimonitor_loki:/loki
+    ports:
+      - "3100:3100"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+
+  promtail:
+    image: grafana/promtail:3.2.0
+    container_name: apimonitor-promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   nginx:
     image: nginx:1.27-alpine
@@ -103,6 +205,7 @@ services:
       MONITOR_API_KEY: ${MONITOR_API_KEY:?Required — set MONITOR_API_KEY in .env}
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.template.yml:ro
+      - ./prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
     ports:
       - "9090:9090"
     depends_on:
@@ -112,6 +215,38 @@ services:
         limits:
           cpus: "0.50"
           memory: 512M
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: apimonitor-alertmanager
+    restart: unless-stopped
+    # Same envsubst-via-sed pattern as prometheus above: injects
+    # ALERT_WEBHOOK_URL into the receiver config at startup.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/alertmanager/alertmanager.template.yml \
+          | sed "s|\$${ALERT_WEBHOOK_URL}|$$ALERT_WEBHOOK_URL|g" \
+          > /tmp/alertmanager.yml \
+        && /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager
+    environment:
+      # Defaults to Alertmanager's own reload endpoint — a local no-op sink,
+      # so the stack starts clean without external config and firing alerts
+      # are still visible in the UI on :9093. Set this in .env to a Slack
+      # incoming-webhook / PagerDuty / internal endpoint to actually get paged.
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-http://alertmanager:9093/-/reload}
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.template.yml:ro
+    ports:
+      - "9093:9093"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
 
   grafana:
     image: grafana/grafana:11.3.0
@@ -138,3 +273,4 @@ services:
 volumes:
   apimonitor_mysql:
   grafana_data:
+  apimonitor_loki:

@@ -14,7 +14,7 @@ from app.services.discovery_service import (
     upsert_shadow_endpoint,
 )
 from app.services.ml_anomaly import is_anomaly, score_event
-from app.services.pathutil import is_documented, normalize_path_for_discovery
+from app.services.pathutil import is_documented, normalize_path_for_discovery, redact_sensitive_query_params
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 def process_single_event(
     db: Session,
     *,
+    org_id: int,
     method: str,
     path: str,
     status_code: int,
@@ -46,15 +47,20 @@ def process_single_event(
     # `templates` is an optional pre-fetched cache so batch callers don't
     # re-query KnownEndpoint per event (was N+1 for 10k-event batches).
     if templates is None:
-        templates = get_known_templates(db)
+        templates = get_known_templates(db, org_id)
     doc = is_documented(method, path, templates)
     norm = normalize_path_for_discovery(path)
     m = method.upper()
+    # Redact credential-carrying query params (token, password, api_key, ...)
+    # before the path is ever written to the DB. is_documented/normalize
+    # above already ignore the query string, so this doesn't affect matching.
+    redacted_path = redact_sensitive_query_params(path)
 
     event = TrafficEvent(
+        org_id=org_id,
         ts=utc_now(),
         method=m,
-        path=path[:1024],
+        path=redacted_path[:1024],
         status_code=status_code,
         latency_ms=latency_ms,
         response_time_ms=latency_ms,
@@ -93,40 +99,46 @@ def process_single_event(
     event.anomaly_features = features
     prom.API_REQUESTS_TOTAL.labels(method=m, path=norm[:120], status=str(status_code)).inc()
     prom.API_REQUEST_DURATION_SECONDS.labels(method=m, path=norm[:120]).inc(max(0.0, latency_ms / 1000.0))
+    prom.REQUEST_DURATION_HISTOGRAM.observe(max(0.0, latency_ms / 1000.0))
     if anomalous and not recent_duplicate(
-        db, alert_type="traffic_anomaly", method=m, path=path[:1024], within_hours=1
+        db, org_id=org_id, alert_type="traffic_anomaly", method=m, path=redacted_path[:1024], within_hours=1
     ):
         prom.ANOMALY_FLAGGED.inc()
         prom.ANOMALY_DETECTIONS_TOTAL.inc()
         db.add(
             Alert(
+                org_id=org_id,
                 alert_type="traffic_anomaly",
                 severity="medium",
                 title="Anomalous API request pattern",
-                detail=f"IsolationForest score={score:.4f} for {m} {path[:500]}",
+                detail=f"IsolationForest score={score:.4f} for {m} {redacted_path[:500]}",
                 method=m,
-                path=path[:1024],
+                path=redacted_path[:1024],
+                event_id=event.id,
+                explanation=features.get("explanation"),
             )
         )
 
-    upsert_discovered(db, m, norm, documented=doc)
+    upsert_discovered(db, org_id, m, norm, documented=doc)
     if doc:
-        touch_known_endpoint_usage(db, m, path)
+        touch_known_endpoint_usage(db, org_id, m, path)
     if not doc:
         upsert_shadow_endpoint(
             db,
+            org_id=org_id,
             method=m,
-            path=path,
+            path=redacted_path,
             client_ip=client_ip,
             auth_present=auth_present,
             status_code=status_code,
         )
         prom.UNDOCUMENTED_HIT.inc()
         if not recent_duplicate(
-            db, alert_type="undocumented_api", method=m, path=norm[:1024], within_hours=6
+            db, org_id=org_id, alert_type="undocumented_api", method=m, path=norm[:1024], within_hours=6
         ):
             db.add(
                 Alert(
+                    org_id=org_id,
                     alert_type="undocumented_api",
                     severity="high",
                     title="Traffic to undocumented endpoint",
@@ -141,6 +153,46 @@ def process_single_event(
         db.commit()
         db.refresh(event)
     return event
+
+
+def delete_traffic_for_client(
+    db: Session,
+    *,
+    client_ip: str | None = None,
+    session_id: str | None = None,
+    chunk_size: int = 5000,
+) -> int:
+    """Permanently delete every captured TrafficEvent row for an identifier.
+
+    Supports GDPR/CCPA-style "delete everything you have on me" requests —
+    distinct from the age-based pruning in ``aggregate_and_prune_old_traffic``,
+    which aggregates into summaries rather than erasing. At least one of
+    ``client_ip`` / ``session_id`` is required; when both are given, rows
+    matching either are deleted.
+    """
+    if not client_ip and not session_id:
+        return 0
+
+    total = 0
+    while True:
+        q = db.query(TrafficEvent.id)
+        if client_ip and session_id:
+            q = q.filter(
+                (TrafficEvent.client_ip == client_ip) | (TrafficEvent.session_id == session_id)
+            )
+        elif client_ip:
+            q = q.filter(TrafficEvent.client_ip == client_ip)
+        else:
+            q = q.filter(TrafficEvent.session_id == session_id)
+        ids = [row.id for row in q.limit(chunk_size).all()]
+        if not ids:
+            break
+        db.query(TrafficEvent).filter(TrafficEvent.id.in_(ids)).delete(synchronize_session=False)
+        db.commit()
+        total += len(ids)
+        if len(ids) < chunk_size:
+            break
+    return total
 
 
 def refresh_gauges(db: Session) -> None:
@@ -172,11 +224,11 @@ def aggregate_and_prune_old_traffic(db: Session, *, keep_days: int = 30, chunk_s
         if not rows:
             break
 
-        # Aggregate this chunk into a local dict keyed by (method, path, day).
-        grouped: dict[tuple[str, str, datetime], dict] = {}
+        # Aggregate this chunk into a local dict keyed by (org, method, path, day).
+        grouped: dict[tuple[int, str, str, datetime], dict] = {}
         for row in rows:
             day = row.ts.replace(hour=0, minute=0, second=0, microsecond=0)
-            key = (row.method, normalize_path_for_discovery(row.path), day)
+            key = (row.org_id, row.method, normalize_path_for_discovery(row.path), day)
             if key not in grouped:
                 grouped[key] = {"count": 0, "rt_sum": 0.0, "errors": 0}
             grouped[key]["count"] += 1
@@ -184,13 +236,14 @@ def aggregate_and_prune_old_traffic(db: Session, *, keep_days: int = 30, chunk_s
             grouped[key]["errors"] += 1 if row.status_code >= 400 else 0
 
         # Upsert into TrafficDailySummary.
-        for (method, path, day), agg in grouped.items():
+        for (org_id, method, path, day), agg in grouped.items():
             count = agg["count"]
             avg_rt = agg["rt_sum"] / float(max(1, count))
             errors = agg["errors"]
             existing = (
                 db.query(TrafficDailySummary)
                 .filter(
+                    TrafficDailySummary.org_id == org_id,
                     TrafficDailySummary.day == day,
                     TrafficDailySummary.method == method,
                     TrafficDailySummary.path_normalized == path,
@@ -204,6 +257,7 @@ def aggregate_and_prune_old_traffic(db: Session, *, keep_days: int = 30, chunk_s
             else:
                 db.add(
                     TrafficDailySummary(
+                        org_id=org_id,
                         day=day,
                         method=method,
                         path_normalized=path,

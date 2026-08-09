@@ -1,8 +1,40 @@
 import re
+from urllib.parse import parse_qsl, urlencode
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 _NUM_RE = re.compile(r"^\d+$")
 _SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+){2,}$")
+
+# Query parameter names whose values are redacted before a captured path is
+# ever persisted — query strings routinely carry bearer tokens, API keys, and
+# passwords (e.g. `?token=eyJ...`), and this is a monitoring tool that must
+# not become a second place those secrets get stored in plaintext.
+DEFAULT_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "token", "access_token", "refresh_token", "id_token", "api_key", "apikey",
+        "password", "passwd", "pwd", "secret", "client_secret", "auth", "session", "jwt", "key",
+    }
+)
+
+
+def redact_sensitive_query_params(
+    path: str, sensitive_keys: frozenset[str] = DEFAULT_SENSITIVE_QUERY_KEYS
+) -> str:
+    """Replace the values of sensitive query-string params with a fixed marker.
+
+    The parameter name is kept (useful for shadow/anomaly analysis); only the
+    value — the part that can actually be a live credential — is redacted.
+    """
+    if "?" not in path:
+        return path
+    base, _, query = path.partition("?")
+    if not query:
+        return path
+    pairs = parse_qsl(query, keep_blank_values=True)
+    if not any(k.lower() in sensitive_keys for k, _ in pairs):
+        return path
+    redacted = [(k, "REDACTED" if k.lower() in sensitive_keys else v) for k, v in pairs]
+    return f"{base}?{urlencode(redacted)}"
 
 
 def normalize_path_for_discovery(path: str) -> str:

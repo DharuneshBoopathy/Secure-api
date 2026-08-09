@@ -1,3 +1,4 @@
+import functools
 import logging
 from datetime import timedelta
 
@@ -6,8 +7,10 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import SessionLocal
-from app.models import RefreshToken, TrafficEvent
+from app.models import Organization, RefreshToken, TrafficEvent
 from app.security import utc_now
+from app.services import leader
+from app.services import metrics as prom
 from app.services.discovery_service import recompute_zombie_states, scan_idle_documented_endpoints, update_prometheus_gauges
 from app.services.ml_anomaly import save_model, train_from_db
 from app.services.traffic_processor import aggregate_and_prune_old_traffic, refresh_gauges
@@ -15,24 +18,59 @@ from app.services.traffic_processor import aggregate_and_prune_old_traffic, refr
 log = logging.getLogger(__name__)
 
 
+def _leader_only(fn):
+    """Skip this job on every replica except the elected leader (see
+    app/services/leader.py) — for jobs that WRITE shared state (retrain,
+    prune, idle-scan): running them on every replica would duplicate work
+    and race on the same rows. NOT applied to _gauges: that one only sets
+    this process's own in-memory Prometheus metric objects, and Prometheus
+    scrapes each replica's /metrics independently — gating it would leave
+    non-leader replicas serving stale/zero metrics forever, which is worse
+    than the "runs N times" problem this decorator exists to solve."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not leader.is_leader():
+            log.debug("Skipping %s: not the elected leader in this Redis-coordinated deployment", fn.__name__)
+            return
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_leader_only
 def _retrain_ml():
+    # One model per org (see app/services/ml_anomaly.py) — training org A's
+    # and org B's traffic together would leak each tenant's behavioral
+    # baseline into the other's model, on top of just being less accurate.
     db = SessionLocal()
     try:
-        model = train_from_db(db)
-        if model:
-            save_model(db, model)
-            log.info("ML model retrained and persisted")
+        for org_id in [row.id for row in db.query(Organization.id).all()]:
+            try:
+                model = train_from_db(db, org_id)
+                if model:
+                    save_model(db, org_id, model)
+                    log.info("ML model retrained and persisted (org_id=%s)", org_id)
+            except Exception:
+                log.exception("ML retrain failed for org_id=%s", org_id)
+        prom.ML_LAST_RETRAIN_TIMESTAMP.set(utc_now().timestamp())
     except Exception:
         log.exception("ML retrain failed")
     finally:
         db.close()
 
 
+@_leader_only
 def _idle_scan():
     db = SessionLocal()
     try:
-        scan_idle_documented_endpoints(db)
-        recompute_zombie_states(db)
+        # Idle/zombie state is per-org (matching against org A's KnownEndpoint
+        # templates and org B's traffic to the same path would misclassify
+        # both), so this loops every organization rather than running once
+        # globally.
+        for org_id in [row.id for row in db.query(Organization.id).all()]:
+            scan_idle_documented_endpoints(db, org_id)
+            recompute_zombie_states(db, org_id)
         refresh_gauges(db)
     except Exception:
         log.exception("Idle scan failed")
@@ -50,6 +88,7 @@ def _gauges():
         db.close()
 
 
+@_leader_only
 def _traffic_rollup():
     db = SessionLocal()
     try:
@@ -105,6 +144,7 @@ def prune_stale_traffic(db: Session, *, chunk_size: int = 5000) -> int:
     return total_deleted
 
 
+@_leader_only
 def _prune_stale_traffic():
     db = SessionLocal()
     try:
@@ -120,6 +160,7 @@ def _prune_stale_traffic():
         db.close()
 
 
+@_leader_only
 def _prune_expired_refresh_tokens():
     """Delete expired and old revoked refresh token rows.
 
