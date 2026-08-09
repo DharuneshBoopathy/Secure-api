@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { apiFetch, Paginated, TrafficEventOut } from "@/api/client";
+import { openTicketedStream } from "@/api/stream";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { useAppStore } from "@/store/appStore";
+import { axisTick, chart, tooltipStyle } from "@/theme/charts";
 
 export function Traffic() {
   const token = useAppStore((s) => s.accessToken);
@@ -33,10 +35,8 @@ export function Traffic() {
 
   useEffect(() => {
     const apiKey = localStorage.getItem("apimonitor_api_key") ?? "";
-    const authHeader = token ? `Bearer ${token}` : apiKey;
-    if (!authHeader) return;
-    const src = new EventSource(`/api/traffic/stream?auth=${encodeURIComponent(authHeader)}`);
-    src.onmessage = (ev) => {
+    if (!token && !apiKey) return;
+    return openTicketedStream("/api/traffic/stream", (ev) => {
       try {
         const d = JSON.parse(ev.data) as {
           id: number;
@@ -75,9 +75,7 @@ export function Traffic() {
       } catch {
         // ignore malformed event payload
       }
-    };
-    src.onerror = () => src.close();
-    return () => src.close();
+    });
   }, [token]);
 
   const rpm = useMemo(() => {
@@ -96,25 +94,25 @@ export function Traffic() {
   return (
     <div>
       <PageHeader title="Live Traffic" subtitle="Most recent requests with anomaly labels." />
-      {err ? <p className="text-sm text-rose-600">{err}</p> : null}
-      <div className="mb-4 h-48 rounded-2xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900">
+      {err ? <p className="text-sm text-negative-600">{err}</p> : null}
+      <div className="glass-card mb-4 h-48 p-3">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={rpm}>
             <XAxis dataKey="minute" hide />
-            <YAxis allowDecimals={false} />
-            <Tooltip />
-            <Bar dataKey="count" fill="#2563eb" radius={[4, 4, 0, 0]} />
+            <YAxis allowDecimals={false} tick={axisTick} />
+            <Tooltip contentStyle={tooltipStyle} cursor={{ fill: "rgb(32 128 141 / 0.08)" }} />
+            <Bar dataKey="count" fill={chart.accent} radius={[6, 6, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
       </div>
       {loading ? (
-        <p className="text-sm text-slate-500">Loading...</p>
+        <p className="text-sm text-ink-500 dark:text-ink-400">Loading...</p>
       ) : rows.length === 0 ? (
         <EmptyState title="No traffic yet" description="Start ingesting events to populate the stream." />
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="overflow-hidden rounded-2xl border border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 dark:bg-slate-800">
+            <thead className="bg-ink-50 dark:bg-ink-800">
               <tr>
                 <th className="px-3 py-2 text-left">Timestamp</th>
                 <th className="px-3 py-2 text-left">Method</th>
@@ -126,7 +124,7 @@ export function Traffic() {
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id} className="border-t border-slate-100 dark:border-slate-800">
+                <tr key={row.id} className="border-t border-ink-100 dark:border-ink-800">
                   <td className="px-3 py-2">{new Date(row.ts).toLocaleString()}</td>
                   <td className="px-3 py-2">{row.method}</td>
                   <td className="px-3 py-2 font-mono text-xs">{row.path}</td>

@@ -56,7 +56,8 @@ export function Zombie() {
               setPage(1);
               setStatusFilter(e.target.value);
             }}
-            className="rounded-lg border border-slate-200 px-2 py-1 text-sm"
+            aria-label="Filter by status"
+            className="rounded-lg border border-ink-200 px-2 py-1 text-sm"
           >
             <option value="">All statuses</option>
             <option value="ACTIVE">ACTIVE</option>
@@ -68,20 +69,20 @@ export function Zombie() {
           </select>
         }
       />
-      {error ? <p className="text-sm text-rose-600">{(error as Error).message}</p> : null}
+      {error ? <p className="text-sm text-negative-600">{(error).message}</p> : null}
       {isLoading ? (
-        <p className="text-sm text-slate-500">Loading...</p>
+        <p className="text-sm text-ink-500 dark:text-ink-400">Loading...</p>
       ) : !data || data.items.length === 0 ? (
         <EmptyState title="No zombie findings" description="All registered endpoints are active." />
       ) : (
         <div className="space-y-3">
           {data.items.map((row) => (
-            <div key={row.id} className="rounded-xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+            <div key={row.id} className="rounded-xl border border-ink-200 bg-white p-4 dark:border-ink-800 dark:bg-ink-900">
               <div className="flex items-center gap-3">
                 <Badge variant={statusVariant[row.status]}>{row.status}</Badge>
                 <span className="font-mono text-xs">{row.method} {row.path_template}</span>
               </div>
-              <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+              <p className="mt-2 text-xs text-ink-600 dark:text-ink-300">
                 7d: {row.requests_7d} · 14d: {row.requests_14d} · 30d: {row.requests_30d} · avg/day: {row.avg_daily_requests_30d.toFixed(2)}
               </p>
               <div className="mt-3 flex gap-2">
@@ -99,7 +100,7 @@ export function Zombie() {
           ))}
         </div>
       )}
-      <div className="mt-3 flex items-center justify-between text-sm text-slate-600">
+      <div className="mt-3 flex items-center justify-between text-sm text-ink-600 dark:text-ink-400">
         <span>Total: {data?.total ?? 0}</span>
         <div className="flex gap-2">
           <Button variant="secondary" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>

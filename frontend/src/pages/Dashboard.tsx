@@ -1,20 +1,28 @@
 import { Activity, BookMarked, RefreshCw, Route, ShieldAlert } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts";
+import { Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Link } from "react-router-dom";
-import type { LatestOpenApiResponse, Paginated, Stats, ZombieRow } from "@/api/client";
-import { ApiError, apiFetch, isAuthenticated } from "@/api/client";
+import type { LatestOpenApiResponse, Paginated, Stats, TrafficTrendPoint, ZombieRow } from "@/api/client";
+import { ApiError, apiFetch, getTrafficTrend, isAuthenticated } from "@/api/client";
 import { Button } from "@/components/Button";
+import { OnboardingWizard } from "@/components/OnboardingWizard";
 import { PageHeader } from "@/components/PageHeader";
 import { StatCard } from "@/components/StatCard";
+import { axisTick, chart, colorForStatus, tooltipStyle } from "@/theme/charts";
+
+const ONBOARDING_DISMISSED_KEY = "apimonitor_onboarding_dismissed";
 
 export function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [registry, setRegistry] = useState<LatestOpenApiResponse | null>(null);
   const [health, setHealth] = useState<string | null>(null);
   const [zombie, setZombie] = useState<ZombieRow[]>([]);
+  const [trend, setTrend] = useState<TrafficTrendPoint[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+  const [onboardingDismissed, setOnboardingDismissed] = useState(
+    () => localStorage.getItem(ONBOARDING_DISMISSED_KEY) === "true",
+  );
 
   const load = useCallback(async () => {
     setErr(null);
@@ -28,14 +36,16 @@ export function Dashboard() {
         setLoading(false);
         return;
       }
-      const [s, reg, z] = await Promise.all([
+      const [s, reg, z, t] = await Promise.all([
         apiFetch<Stats>("/inventory/stats"),
         apiFetch<LatestOpenApiResponse>("/registry/openapi/latest"),
         apiFetch<Paginated<ZombieRow>>("/zombie?page=1&page_size=100"),
+        getTrafficTrend(30),
       ]);
       setStats(s);
       setRegistry(reg);
       setZombie(z.items);
+      setTrend(t);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         setErr("Invalid API key. Update it under Settings.");
@@ -45,6 +55,7 @@ export function Dashboard() {
       setStats(null);
       setRegistry(null);
       setZombie([]);
+      setTrend([]);
     } finally {
       setLoading(false);
     }
@@ -66,12 +77,7 @@ export function Dashboard() {
     return acc;
   }, {});
   const statusData = Object.entries(statusCounts).map(([name, value]) => ({ name, value }));
-  const trafficTrend = [
-    { hour: "Now-3h", requests: Math.max(0, Math.round((stats?.events_last_hour ?? 0) * 0.6)) },
-    { hour: "Now-2h", requests: Math.max(0, Math.round((stats?.events_last_hour ?? 0) * 0.75)) },
-    { hour: "Now-1h", requests: Math.max(0, Math.round((stats?.events_last_hour ?? 0) * 0.9)) },
-    { hour: "Now", requests: stats?.events_last_hour ?? 0 },
-  ];
+  const trendHasData = trend.some((p) => p.requests > 0);
 
   return (
     <div>
@@ -87,22 +93,37 @@ export function Dashboard() {
       />
 
       {!isAuthenticated() ? (
-        <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+        <div className="mb-6 rounded-xl border border-warning-200 bg-warning-50 px-4 py-3 text-sm text-warning-950">
           <span className="font-semibold">Authentication required.</span>{" "}
-          <Link className="font-medium text-brand-700 underline underline-offset-2" to="/login">
+          <Link className="font-medium text-accent-700 underline underline-offset-2 dark:text-accent-300" to="/login">
             Sign in
           </Link>{" "}
-          or set your <code className="rounded bg-amber-100/80 px-1 font-mono text-xs">X-Monitor-Key</code> under{" "}
-          <Link className="font-medium text-brand-700 underline underline-offset-2" to="/settings">
+          or set your <code className="rounded bg-warning-100/80 px-1 font-mono text-xs">X-Monitor-Key</code> under{" "}
+          <Link className="font-medium text-accent-700 underline underline-offset-2 dark:text-accent-300" to="/settings">
             Settings
           </Link>.
         </div>
       ) : null}
 
       {err ? (
-        <div className="mb-6 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+        <div className="mb-6 rounded-xl border border-negative-200 bg-negative-50 px-4 py-3 text-sm text-negative-900">
           {err}
         </div>
+      ) : null}
+
+      {stats &&
+      !onboardingDismissed &&
+      stats.known_endpoints === 0 &&
+      stats.discovered_undocumented === 0 &&
+      stats.events_last_hour === 0 ? (
+        <OnboardingWizard
+          stats={stats}
+          onDataChanged={() => void load()}
+          onDismiss={() => {
+            localStorage.setItem(ONBOARDING_DISMISSED_KEY, "true");
+            setOnboardingDismissed(true);
+          }}
+        />
       ) : null}
 
       <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -136,22 +157,24 @@ export function Dashboard() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card">
-          <h2 className="text-sm font-semibold text-slate-900">Service status</h2>
+        <div className="glass-card p-6">
+          <h2 className="text-sm font-semibold text-ink-900 dark:text-ink-50">Service status</h2>
           <dl className="mt-4 space-y-3 text-sm">
             <div className="flex justify-between gap-4">
-              <dt className="text-slate-500">Backend</dt>
-              <dd className="font-medium text-slate-900">{health ?? "…"}</dd>
+              <dt className="text-ink-500 dark:text-ink-400">Backend</dt>
+              <dd className="font-medium text-ink-900 dark:text-ink-50">{health ?? "…"}</dd>
             </div>
             <div className="flex justify-between gap-4">
-              <dt className="text-slate-500">Latest OpenAPI</dt>
-              <dd className="max-w-[60%] truncate text-right font-medium text-slate-900">{regTitle}</dd>
+              <dt className="text-ink-500 dark:text-ink-400">Latest OpenAPI</dt>
+              <dd className="max-w-[60%] truncate text-right font-medium text-ink-900 dark:text-ink-50">{regTitle}</dd>
             </div>
           </dl>
           <div className="mt-6 flex flex-wrap gap-2">
+            {/* Anchors rather than <Button>, so they carry the same pill
+                geometry by hand. */}
             <Link
               to="/registry"
-              className="inline-flex rounded-lg bg-brand-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-brand-700"
+              className="inline-flex rounded-full bg-accent-500 px-5 py-2.5 text-sm font-medium text-white ring-1 ring-inset ring-white/20 shadow-glow transition hover:bg-accent-600"
             >
               Upload OpenAPI
             </Link>
@@ -159,67 +182,66 @@ export function Dashboard() {
               href="/docs"
               target="_blank"
               rel="noreferrer"
-              className="inline-flex rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+              className="glass inline-flex rounded-full px-5 py-2.5 text-sm font-medium text-ink-800 transition hover:bg-white/80 dark:text-ink-100 dark:hover:bg-white/[0.10]"
             >
               Swagger docs
             </a>
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card">
-          <h2 className="text-sm font-semibold text-slate-900">Quick checks</h2>
-          <ul className="mt-4 list-inside list-disc space-y-2 text-sm text-slate-600">
+        <div className="glass-card p-6">
+          <h2 className="text-sm font-semibold text-ink-900 dark:text-ink-50">Quick checks</h2>
+          <ul className="mt-4 list-inside list-disc space-y-2 text-sm text-ink-600 dark:text-ink-400">
             <li>
-              Review <Link className="font-medium text-brand-700 hover:underline" to="/shadow">shadow APIs</Link> for
+              Review <Link className="font-medium text-accent-700 hover:underline dark:text-accent-300" to="/shadow">shadow APIs</Link> for
               undocumented routes.
             </li>
             <li>
-              Acknowledge noise in <Link className="font-medium text-brand-700 hover:underline" to="/alerts">Alerts</Link>
+              Acknowledge noise in <Link className="font-medium text-accent-700 hover:underline dark:text-accent-300" to="/alerts">Alerts</Link>
               .
             </li>
             <li>
-              Compare <Link className="font-medium text-brand-700 hover:underline" to="/idle">idle routes</Link> against
+              Compare <Link className="font-medium text-accent-700 hover:underline dark:text-accent-300" to="/idle">idle routes</Link> against
               deprecations.
             </li>
           </ul>
         </div>
 
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card">
-          <h2 className="mb-3 text-sm font-semibold text-slate-900">Traffic trend (last 4h)</h2>
+        <div className="glass-card p-6">
+          <h2 className="mb-1 text-sm font-semibold text-ink-900 dark:text-ink-100">Traffic trend (last 30 days)</h2>
+          <p className="mb-3 text-xs text-ink-500 dark:text-ink-400">
+            Requests and errors per day, from live traffic and daily rollups.
+          </p>
           <div className="h-44">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={trafficTrend}>
-                <Tooltip />
-                <Line type="monotone" dataKey="requests" stroke="#2563eb" strokeWidth={2} dot={false} />
-              </LineChart>
-            </ResponsiveContainer>
+            {trendHasData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trend}>
+                  <XAxis dataKey="day" tick={axisTick} tickFormatter={(d: string) => d.slice(5)} minTickGap={24} />
+                  <YAxis tick={axisTick} width={32} allowDecimals={false} />
+                  <Tooltip contentStyle={tooltipStyle} />
+                  <Line type="monotone" dataKey="requests" name="Requests" stroke={chart.accent} strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="errors" name="Errors" stroke={chart.negative} strokeWidth={2} dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-full items-center justify-center text-xs text-ink-400 dark:text-ink-500">
+                No traffic ingested yet.
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card">
-          <h2 className="mb-3 text-sm font-semibold text-slate-900">Endpoint health mix</h2>
+        <div className="glass-card p-6">
+          <h2 className="mb-3 text-sm font-semibold text-ink-900 dark:text-ink-50">Endpoint health mix</h2>
           <div className="h-44">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
                 <Pie data={statusData} dataKey="value" nameKey="name" outerRadius={72}>
                   {statusData.map((entry) => (
-                    <Cell
-                      key={entry.name}
-                      fill={
-                        entry.name === "ACTIVE"
-                          ? "#10b981"
-                          : entry.name === "DECLINING"
-                            ? "#0ea5e9"
-                            : entry.name === "IDLE"
-                              ? "#f59e0b"
-                              : entry.name === "RETIRED"
-                                ? "#64748b"
-                                : "#ef4444"
-                      }
-                    />
+                    <Cell key={entry.name} fill={colorForStatus(entry.name)} stroke="none" />
                   ))}
                 </Pie>
-                <Tooltip />
+                <Tooltip contentStyle={tooltipStyle} />
               </PieChart>
             </ResponsiveContainer>
           </div>

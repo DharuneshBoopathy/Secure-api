@@ -24,19 +24,19 @@ export function Settings() {
       />
       <form
         onSubmit={save}
-        className="max-w-xl rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card"
+        className="max-w-xl glass-card p-6"
       >
-        <div className="flex items-center gap-2 text-slate-800">
-          <KeyRound className="h-5 w-5 text-brand-600" />
+        <div className="flex items-center gap-2 text-ink-800 dark:text-ink-100">
+          <KeyRound className="h-5 w-5 text-accent-600" />
           <span className="text-sm font-semibold">X-Monitor-Key</span>
         </div>
-        <p className="mt-2 text-sm text-slate-600">
+        <p className="mt-2 text-sm text-ink-600 dark:text-ink-400">
           Stored only in this browser (localStorage). Sent as a header on dashboard and inventory requests.
         </p>
         <input
           type="password"
           autoComplete="off"
-          className="mt-4 w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+          className="mt-4 w-full rounded-lg border border-ink-200 px-3 py-2 font-mono text-sm shadow-sm focus:border-accent-500 focus:outline-none focus:ring-2 focus:ring-accent-500/20"
           value={key}
           onChange={(e) => setKey(e.target.value)}
           placeholder="change-me-local-dev-key"
@@ -46,7 +46,7 @@ export function Settings() {
             <Save className="h-4 w-4" />
             Save key
           </Button>
-          {saved ? <span className="text-sm font-medium text-emerald-600">Saved.</span> : null}
+          {saved ? <span className="text-sm font-medium text-positive-600">Saved.</span> : null}
         </div>
       </form>
     </div>

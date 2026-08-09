@@ -9,7 +9,8 @@ const PASSWORD_RULES = [
   { label: "One uppercase letter", test: (p: string) => /[A-Z]/.test(p) },
   { label: "One lowercase letter", test: (p: string) => /[a-z]/.test(p) },
   { label: "One digit", test: (p: string) => /\d/.test(p) },
-  { label: "One special character", test: (p: string) => /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?`~]/.test(p) },
+  // `\-` `\]` `\\` are load-bearing inside the class; `[` and `/` are not.
+  { label: "One special character", test: (p: string) => /[!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?`~]/.test(p) },
 ];
 
 export function Register() {
@@ -46,7 +47,7 @@ export function Register() {
         body: JSON.stringify({ username, email, password }),
       });
       setTokens(res.access_token, res.refresh_token, res.user);
-      navigate("/", { replace: true });
+      void navigate("/", { replace: true });
     } catch (error) {
       setErr(error instanceof Error ? error.message : "Registration failed");
     } finally {
@@ -55,14 +56,18 @@ export function Register() {
   }
 
   return (
-    <div className="mx-auto mt-12 max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-card dark:border-slate-700 dark:bg-slate-900">
-      <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">Create account</h1>
-      <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">Register for an API Security Monitor account.</p>
-      <form onSubmit={submit} className="mt-4 space-y-4">
+    // Same as Login: outside <Layout>, so it brings its own ambient ground.
+    <div className="bg-ambient flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="glass-card w-full max-w-md p-8 animate-fade-rise">
+        <h1 className="font-display text-3xl tracking-[-0.02em] text-ink-900 dark:text-ink-50">Create account</h1>
+        <p className="mt-1.5 text-sm text-ink-600 dark:text-ink-400">
+          Register for an API Security Monitor account.
+        </p>
+        <form onSubmit={(e) => void submit(e)} className="mt-6 space-y-4">
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">Username</label>
+          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Username</label>
           <input
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            className="w-full field dark:text-ink-100"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             placeholder="johndoe"
@@ -73,10 +78,10 @@ export function Register() {
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">Email</label>
+          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Email</label>
           <input
             type="email"
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            className="w-full field dark:text-ink-100"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@example.com"
@@ -84,10 +89,10 @@ export function Register() {
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">Password</label>
+          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Password</label>
           <input
             type="password"
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            className="w-full field dark:text-ink-100"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Strong password"
@@ -98,7 +103,7 @@ export function Register() {
               {PASSWORD_RULES.map((rule) => (
                 <li
                   key={rule.label}
-                  className={`text-xs flex items-center gap-1.5 ${rule.test(password) ? "text-emerald-600" : "text-slate-400"}`}
+                  className={`text-xs flex items-center gap-1.5 ${rule.test(password) ? "text-positive-600" : "text-ink-400"}`}
                 >
                   <span>{rule.test(password) ? "\u2713" : "\u2022"}</span>
                   {rule.label}
@@ -108,20 +113,20 @@ export function Register() {
           )}
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-slate-300">Confirm password</label>
+          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Confirm password</label>
           <input
             type="password"
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            className="w-full field dark:text-ink-100"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             placeholder="Repeat password"
             required
           />
           {confirmPassword.length > 0 && !passwordsMatch && (
-            <p className="mt-1 text-xs text-rose-500">Passwords do not match</p>
+            <p className="mt-1 text-xs text-negative-500">Passwords do not match</p>
           )}
         </div>
-        {err ? <p className="text-sm text-rose-600">{err}</p> : null}
+        {err ? <p className="text-sm text-negative-600">{err}</p> : null}
         <Button
           type="submit"
           className="w-full"
@@ -129,13 +134,14 @@ export function Register() {
         >
           {loading ? "Creating account..." : "Create account"}
         </Button>
-      </form>
-      <p className="mt-4 text-center text-sm text-slate-500 dark:text-slate-400">
-        Already have an account?{" "}
-        <Link to="/login" className="font-medium text-brand-600 hover:text-brand-700 dark:text-brand-400">
-          Sign in
-        </Link>
-      </p>
+        </form>
+        <p className="mt-6 text-center text-sm text-ink-600 dark:text-ink-400">
+          Already have an account?{" "}
+          <Link to="/login" className="font-medium text-accent-600 hover:text-accent-700 dark:text-accent-300">
+            Sign in
+          </Link>
+        </p>
+      </div>
     </div>
   );
 }

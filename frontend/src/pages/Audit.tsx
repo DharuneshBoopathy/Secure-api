@@ -22,15 +22,15 @@ export function Audit() {
   return (
     <div>
       <PageHeader title="Audit Log" subtitle="Security and operational events." />
-      {error ? <p className="text-sm text-rose-600">{(error as Error).message}</p> : null}
+      {error ? <p className="text-sm text-negative-600">{(error).message}</p> : null}
       {isLoading ? (
-        <p className="text-sm text-slate-500">Loading...</p>
+        <p className="text-sm text-ink-500 dark:text-ink-400">Loading...</p>
       ) : !data || data.items.length === 0 ? (
         <EmptyState title="No audit entries" description="Events will appear as actions occur." />
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+        <div className="overflow-hidden rounded-2xl border border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
           <table className="min-w-full text-sm">
-            <thead className="bg-slate-50 dark:bg-slate-800">
+            <thead className="bg-ink-50 dark:bg-ink-800">
               <tr>
                 <th className="px-3 py-2 text-left">Timestamp</th>
                 <th className="px-3 py-2 text-left">Event</th>
@@ -41,7 +41,7 @@ export function Audit() {
             </thead>
             <tbody>
               {data.items.map((row) => (
-                <tr key={row.id} className="border-t border-slate-100 dark:border-slate-800">
+                <tr key={row.id} className="border-t border-ink-100 dark:border-ink-800">
                   <td className="px-3 py-2">{new Date(row.timestamp).toLocaleString()}</td>
                   <td className="px-3 py-2">{row.event_type}</td>
                   <td className="px-3 py-2">{row.actor}</td>

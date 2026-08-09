@@ -86,34 +86,34 @@ export function Registry() {
       />
 
       {latestLine ? (
-        <div className="mb-6 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 shadow-sm">
-          <span className="font-semibold text-slate-900">Latest: </span>
+        <div className="mb-6 glass-card px-4 py-3 text-sm text-ink-700 dark:text-ink-200">
+          <span className="font-semibold text-ink-900 dark:text-ink-50">Latest: </span>
           {latestLine}
         </div>
       ) : null}
 
       <form
         onSubmit={(e) => void submit(e)}
-        className="rounded-2xl border border-slate-200/80 bg-white p-6 shadow-card"
+        className="glass-card p-6"
       >
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-ink-400">
               Title
             </label>
             <input
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+              className="field mt-1"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Payments API"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+            <label className="block text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-ink-400">
               Version (optional)
             </label>
             <input
-              className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+              className="field mt-1"
               value={version}
               onChange={(e) => setVersion(e.target.value)}
               placeholder="1.0.0"
@@ -121,11 +121,11 @@ export function Registry() {
           </div>
         </div>
         <div className="mt-4">
-          <label className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <label className="block text-xs font-semibold uppercase tracking-wide text-ink-500 dark:text-ink-400">
             OpenAPI YAML
           </label>
           <textarea
-            className="mt-1 h-72 w-full rounded-lg border border-slate-200 px-3 py-2 font-mono text-xs leading-relaxed shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+            className="field mt-1 h-72 font-mono text-xs leading-relaxed"
             value={yaml}
             onChange={(e) => setYaml(e.target.value)}
             placeholder={
@@ -134,8 +134,8 @@ export function Registry() {
             spellCheck={false}
           />
         </div>
-        {err ? <p className="mt-3 text-sm text-rose-600">{err}</p> : null}
-        {msg ? <p className="mt-3 text-sm text-emerald-700">{msg}</p> : null}
+        {err ? <p className="mt-3 text-sm text-negative-600">{err}</p> : null}
+        {msg ? <p className="mt-3 text-sm text-positive-700">{msg}</p> : null}
         <div className="mt-6">
           <Button type="submit" disabled={submitting}>
             <Upload className="h-4 w-4" />

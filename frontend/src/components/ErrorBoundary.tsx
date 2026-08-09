@@ -13,7 +13,7 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.hasError) {
       return (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+        <div className="rounded-xl border border-negative-200 bg-negative-50 px-4 py-3 text-sm text-negative-900">
           Something went wrong while rendering this page. Refresh and try again.
         </div>
       );

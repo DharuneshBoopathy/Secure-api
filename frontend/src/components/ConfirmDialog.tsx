@@ -21,24 +21,28 @@ export function ConfirmDialog({
 }: Props) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
-      <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-700 dark:bg-slate-900">
-        <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">{title}</h3>
-        <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{description}</p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-950/40 p-4 backdrop-blur-sm">
+      <div className="glass-strong w-full max-w-md rounded-3xl p-6 animate-fade-rise">
+        <h3 className="font-display text-xl text-ink-900 dark:text-ink-50">{title}</h3>
+        <p className="mt-1.5 text-sm text-ink-600 dark:text-ink-300">{description}</p>
         <textarea
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          className="mt-3 h-24 w-full rounded-lg border border-slate-200 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-950"
+          className="field mt-4 h-24 resize-none"
           placeholder="Reason"
         />
-        <div className="mt-3 flex justify-end gap-2">
-          <button type="button" onClick={onCancel} className="rounded-md border border-slate-200 px-3 py-1 text-sm">
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-full px-4 py-2 text-sm font-medium text-ink-700 transition hover:bg-ink-900/[0.06] dark:text-ink-300 dark:hover:bg-white/[0.08]"
+          >
             Cancel
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className="rounded-md bg-brand-600 px-3 py-1 text-sm text-white"
+            className="rounded-full bg-accent-500 px-4 py-2 text-sm font-medium text-white ring-1 ring-inset ring-white/20 transition hover:bg-accent-600 disabled:pointer-events-none disabled:opacity-40"
             disabled={reason.trim().length < 3}
           >
             {confirmLabel}

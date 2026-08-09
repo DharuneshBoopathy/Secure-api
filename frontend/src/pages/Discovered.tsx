@@ -56,18 +56,18 @@ export function Discovered() {
         }
       />
       {err ? (
-        <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">
+        <div className="mb-4 rounded-xl border border-negative-200 bg-negative-50 px-4 py-3 text-sm text-negative-900">
           {err}
         </div>
       ) : null}
       {loading ? (
-        <p className="text-sm text-slate-500">Loading…</p>
+        <p className="text-sm text-ink-500 dark:text-ink-400">Loading…</p>
       ) : rows.length === 0 ? (
         <EmptyState title="No endpoints yet" description="Ingest traffic or run your seed script." />
       ) : (
-        <div className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-card">
-          <table className="min-w-full divide-y divide-slate-100 text-sm">
-            <thead className="bg-slate-50/80 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
+        <div className="overflow-hidden glass-card">
+          <table className="min-w-full divide-y divide-ink-100 text-sm">
+            <thead className="bg-ink-50/80 text-left text-xs font-semibold uppercase tracking-wider text-ink-500 dark:text-ink-400">
               <tr>
                 <th className="px-4 py-3">Method</th>
                 <th className="px-4 py-3">Path</th>
@@ -76,13 +76,13 @@ export function Discovered() {
                 <th className="px-4 py-3">Last seen</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-ink-100">
               {rows.map((r) => (
-                <tr key={`${r.method}-${r.path_normalized}`} className="hover:bg-slate-50/60">
+                <tr key={`${r.method}-${r.path_normalized}`} className="hover:bg-ink-50/60">
                   <td className="px-4 py-3">
                     <Badge variant="info">{r.method}</Badge>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-slate-800">{r.path_normalized}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-ink-800 dark:text-ink-100">{r.path_normalized}</td>
                   <td className="px-4 py-3">
                     {r.documented ? (
                       <Badge variant="ok">Yes</Badge>
@@ -91,7 +91,7 @@ export function Discovered() {
                     )}
                   </td>
                   <td className="px-4 py-3 tabular-nums">{r.hit_count}</td>
-                  <td className="px-4 py-3 text-slate-500">{new Date(r.last_seen).toLocaleString()}</td>
+                  <td className="px-4 py-3 text-ink-500 dark:text-ink-400">{new Date(r.last_seen).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>

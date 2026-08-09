@@ -2,22 +2,165 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ---------------------------------------------------------------------------
+   Semantic surface tokens.
+
+   Components reference these rather than raw palette steps, so the light and
+   dark treatments of "a frosted panel" are defined once here instead of as a
+   `dark:` twin on every element. The glass fills are deliberately gradients
+   rather than flat alpha — a single flat white looks like a plain translucent
+   box, while a 145deg ramp from a brighter to a dimmer white reads as a lit
+   pane of glass.
+--------------------------------------------------------------------------- */
 :root {
   color-scheme: light;
+
+  --surface-base: 250 248 245;      /* warm cream page ground */
+  --surface-raised: 255 255 255;
+  --surface-sunken: 244 241 236;
+
+  --glass-fill: linear-gradient(145deg, rgb(255 255 255 / 0.78), rgb(244 241 236 / 0.58));
+  --glass-fill-strong: linear-gradient(145deg, rgb(255 255 255 / 0.92), rgb(247 244 240 / 0.82));
+  --glass-border: rgb(255 255 255 / 0.75);
+  --glass-ring: rgb(39 26 0 / 0.07);
+  --glass-shadow: 0 8px 32px -8px rgb(26 25 24 / 0.12), inset 0 1px 0 rgb(255 255 255 / 0.85);
+
+  --fg-primary: 26 25 24;
+  --fg-secondary: 74 72 66;
+  --fg-tertiary: 107 107 96;
+  --hairline: rgb(39 26 0 / 0.09);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --surface-base: 20 19 18;
+  --surface-raised: 26 25 24;
+  --surface-sunken: 16 15 14;
+
+  --glass-fill: linear-gradient(145deg, rgb(255 255 255 / 0.09), rgb(255 255 255 / 0.04));
+  --glass-fill-strong: linear-gradient(145deg, rgb(255 255 255 / 0.13), rgb(255 255 255 / 0.06));
+  --glass-border: rgb(255 255 255 / 0.14);
+  --glass-ring: rgb(255 255 255 / 0.08);
+  --glass-shadow: 0 8px 32px -8px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.10);
+
+  --fg-primary: 250 248 245;
+  --fg-secondary: 216 211 202;
+  --fg-tertiary: 168 162 154;
+  --hairline: rgb(255 255 255 / 0.10);
 }
 
 body {
-  @apply bg-slate-50 text-slate-900 min-h-screen;
+  background-color: rgb(var(--surface-base));
+  color: rgb(var(--fg-primary));
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
 }
 
-.dark body {
-  @apply bg-slate-950 text-slate-100;
+@layer components {
+  /* The core frosted panel. `backdrop-blur` is what makes the ambient wash
+     behind it bend, so this only looks right over the app background — not
+     over a flat white parent. */
+  .glass {
+    background-image: var(--glass-fill);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+  }
+
+  /* For panels that sit over busy content (drawers, toasts, menus) and need
+     to stay legible rather than merely translucent. */
+  .glass-strong {
+    background-image: var(--glass-fill-strong);
+    border: 1px solid var(--glass-border);
+    box-shadow: var(--glass-shadow);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+  }
+
+  .glass-card {
+    @apply glass rounded-glass;
+  }
+
+  /* Outer hairline in the warm neutral, used where a full glass panel would
+     be too heavy (table row dividers, section rules). */
+  .hairline {
+    border-color: var(--hairline);
+  }
+
+  .field {
+    @apply w-full rounded-xl border bg-white/70 px-3.5 py-2.5 text-sm text-ink-900 transition;
+    @apply placeholder:text-ink-500 focus:outline-none focus:ring-2;
+    border-color: var(--glass-ring);
+  }
+  .field:focus {
+    @apply border-accent-500/40 ring-accent-500/15;
+  }
+  .dark .field {
+    @apply bg-white/[0.06] text-ink-100;
+  }
+}
+
+/* Ambient wash behind the app. Two wide, low-opacity radial pools give the
+   glass panels something with colour variation to refract; a flat background
+   makes backdrop-blur invisible. */
+.bg-ambient {
+  background-image:
+    radial-gradient(60rem 40rem at 12% -10%, rgb(32 128 141 / 0.10), transparent 60%),
+    radial-gradient(50rem 36rem at 92% 8%, rgb(194 105 30 / 0.07), transparent 62%),
+    radial-gradient(46rem 34rem at 50% 104%, rgb(32 128 141 / 0.06), transparent 60%);
+}
+
+.dark .bg-ambient {
+  background-image:
+    radial-gradient(60rem 40rem at 12% -10%, rgb(32 128 141 / 0.20), transparent 60%),
+    radial-gradient(50rem 36rem at 92% 8%, rgb(194 105 30 / 0.10), transparent 62%),
+    radial-gradient(46rem 34rem at 50% 104%, rgb(32 128 141 / 0.12), transparent 60%);
 }
 
 /* Subtle grid for dashboard depth */
 .bg-grid {
   background-image:
-    linear-gradient(to right, rgb(148 163 184 / 0.08) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(148 163 184 / 0.08) 1px, transparent 1px);
-  background-size: 48px 48px;
+    linear-gradient(to right, rgb(107 107 96 / 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(107 107 96 / 0.055) 1px, transparent 1px);
+  background-size: 56px 56px;
+}
+
+.dark .bg-grid {
+  background-image:
+    linear-gradient(to right, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.035) 1px, transparent 1px);
+}
+
+/* Diagonal specular sweep, mirroring the reference design's lit-edge
+   treatment. Used sparingly — the sidebar mark and primary CTA only. */
+.sheen {
+  position: relative;
+  overflow: hidden;
+}
+.sheen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(
+    105deg,
+    transparent 0%,
+    transparent 38%,
+    rgb(255 255 255 / 0.28) 48%,
+    rgb(255 255 255 / 0.28) 52%,
+    transparent 62%,
+    transparent 100%
+  );
+  pointer-events: none;
+}
+
+::selection {
+  background: rgb(32 128 141 / 0.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-rise {
+    animation: none;
+  }
 }
