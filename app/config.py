@@ -3,7 +3,9 @@ import secrets
 from functools import lru_cache
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from app.services.secrets_provider import ExternalSecretsManagerSource
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +18,49 @@ class Settings(BaseSettings):
         env_ignore_empty=True,   # treat VAR= same as unset → default_factory runs
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Resolution order: env var > .env file > external secrets manager
+        # (Vault/AWS/GCP, opt-in via SECRETS_PROVIDER) > /run/secrets/ file >
+        # built-in default. A no-op source when SECRETS_PROVIDER is unset.
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            ExternalSecretsManagerSource(settings_cls),
+            file_secret_settings,
+        )
+
+    # "env" (default) = no external lookup. See app.services.secrets_provider
+    # for supported values ("vault", "aws-secrets-manager", "gcp-secret-manager")
+    # and the additional provider-specific env vars each one requires.
+    secrets_provider: str = "env"
+    # SQLAlchemy connection pool. Explicit rather than left at library
+    # defaults (pool_size=5, max_overflow=10) so sizing is a deliberate,
+    # documented choice per replica count — see the "Connection pooling"
+    # section of the README. Total connections per replica ≈
+    # db_pool_size + db_pool_max_overflow; keep replica_count * that figure
+    # under your MySQL max_connections with headroom for admin/migration
+    # connections.
+    db_pool_size: int = 10
+    db_pool_max_overflow: int = 20
+    db_pool_timeout_seconds: int = 30
+
+    # Optional. None (default) = ingestion is processed synchronously in the
+    # request handler, exactly as before this setting existed — the same
+    # for slowapi's rate-limit storage (see app/routers/auth.py's Limiter).
+    # Set to e.g. redis://redis:6379/0 to decouple /api/ingest/* from the
+    # request path (see app/services/queue_service.py, app/worker.py) and
+    # make rate limits correct across more than one API replica.
+    redis_url: str | None = None
 
     # Set APP_ENV=production to enable strict secret validation at startup.
     # Any other value (including the default "development") enables dev mode:
@@ -40,10 +85,40 @@ class Settings(BaseSettings):
     monitor_api_key: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     secret_key: str = Field(default_factory=lambda: secrets.token_hex(32))
     jwt_algorithm: str = "HS256"
+    # ENCRYPTION_KEY encrypts third-party provider credentials stored in
+    # `monitored_apis` (app/services/crypto.py). Accepts a Fernet key or any
+    # sufficiently
+    # random string. Unset derives one from SECRET_KEY, which is fine for a
+    # single deployment — but rotating SECRET_KEY then makes saved provider
+    # keys undecryptable and they have to be re-entered.
+    encryption_key: str | None = None
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
     admin_username: str = "admin"
     admin_password: str = Field(default_factory=lambda: secrets.token_urlsafe(24))
+    # Per-account login lockout: after this many consecutive failed attempts
+    # (independent of the per-IP slowapi limit on /auth/login), the account is
+    # locked for an exponentially increasing duration.
+    login_lockout_threshold: int = 5
+    login_lockout_base_seconds: int = 30
+    login_lockout_max_seconds: int = 900
+    password_reset_token_expire_minutes: int = 30
+
+    # Outbound email (app/services/mailer.py). Entirely optional: with
+    # SMTP_HOST unset nothing is sent and password reset falls back to
+    # administrator-assisted recovery. Set these to make self-service reset
+    # work — without them a locked-out user has no way back in.
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from: str | None = None
+    smtp_use_starttls: bool = True
+    smtp_use_ssl: bool = False
+    smtp_timeout_seconds: int = 10
+    # Origin used to build links in outbound mail, e.g. https://monitor.example.com.
+    # Without it the reset message can only quote the bare token.
+    public_base_url: str | None = None
     anomaly_threshold: float = 0.8
     ml_retrain_minutes: int = 15
     idle_threshold_hours: int = 24
@@ -55,6 +130,17 @@ class Settings(BaseSettings):
     cors_origins: str = ""
     # Set to true to mount the demo/debug router (development only — never enable in production)
     enable_demo: bool = False
+    # Interactive API docs (/docs, /redoc, /openapi.json). Unauthenticated by
+    # design in FastAPI, so on a monitoring tool they hand any visitor a
+    # complete map of the API surface. Default off in production; set
+    # EXPOSE_API_DOCS=true to re-enable deliberately.
+    expose_api_docs: bool | None = None
+
+    @property
+    def api_docs_enabled(self) -> bool:
+        if self.expose_api_docs is not None:
+            return self.expose_api_docs
+        return self.app_env != "production"
     # Opt-in only: when true, ?auth=<key|bearer> is accepted as a credential
     # source. Off by default because query strings are written to nginx /
     # proxy access logs, browser history, and Referer headers.

@@ -12,12 +12,13 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.config import get_cors_origins, get_settings, validate_security_settings
-from app.database import Base, engine, ensure_phase1_schema, wait_for_database
+from app.database import wait_for_database
 from app.jobs.scheduler import register_jobs, run_bootstrap_training
 from app.problem import generic_exception_handler, http_exception_handler
-from app.routers import alerts, anomalies, audit, auth, demo_api, health, ingest, inventory, openapi_registry, shadow, traffic, zombie
-from app.routers.auth import ensure_default_admin, limiter as auth_limiter
+from app.routers import alerts, anomalies, audit, auth, connections, demo_api, health, ingest, inventory, ml_models, openapi_registry, orgs, privacy, shadow, traffic, zombie
+from app.routers.auth import ensure_default_admin, ensure_default_organization, limiter as auth_limiter
 from app.routers.ingest import PCAP_MAX_BYTES
+from app.services import leader as leader_election
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
@@ -26,15 +27,23 @@ FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 async def lifespan(app: FastAPI):
     validate_security_settings()
     wait_for_database()
-    Base.metadata.create_all(bind=engine)
-    ensure_phase1_schema()
+    # Schema is owned by Alembic migrations (see alembic/), applied as a
+    # pre-start step — `alembic upgrade head` in the Dockerfile CMD / `make
+    # migrate` — not by the app process itself. See docs/adr/001-alembic-migration-strategy.md.
     from app.database import SessionLocal
 
     db = SessionLocal()
     try:
         ensure_default_admin(db)
+        ensure_default_organization(db)
     finally:
         db.close()
+    # Starts the Redis leader-election background thread (no-op, always
+    # "leader", when REDIS_URL isn't set) *before* the scheduler so the
+    # write-side jobs' first tick already knows whether this replica should
+    # actually run them. See app/services/leader.py and
+    # app/jobs/scheduler.py's _leader_only decorator.
+    leader_election.start()
     sched = BackgroundScheduler()
     register_jobs(sched)
     sched.start()
@@ -42,7 +51,10 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=run_bootstrap_training, daemon=True).start()
     yield
     sched.shutdown(wait=False)
+    leader_election.stop()
 
+
+_docs_enabled = get_settings().api_docs_enabled
 
 app = FastAPI(
     title="API Security Monitor",
@@ -53,6 +65,12 @@ app = FastAPI(
     ),
     version="1.0.0",
     lifespan=lifespan,
+    # FastAPI serves these without authentication, so in production they
+    # publish the full route map of a security tool to anyone who asks.
+    # See Settings.api_docs_enabled / EXPOSE_API_DOCS.
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 app.add_middleware(
@@ -63,6 +81,11 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "X-Monitor-Key", "X-Request-ID"],
     expose_headers=["X-Request-ID", "X-RateLimit-Remaining", "Retry-After"],
 )
+
+from app.tracing import setup_tracing  # noqa: E402 — after `app` exists, which it instruments
+
+setup_tracing(app)
+
 app.state.limiter = auth_limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 app.add_middleware(SlowAPIMiddleware)
@@ -123,6 +146,7 @@ if get_settings().enable_demo:
     api.include_router(demo_api.router)
 api.include_router(ingest.router)
 api.include_router(openapi_registry.router)
+api.include_router(connections.router)
 api.include_router(inventory.router)
 api.include_router(alerts.router)
 api.include_router(audit.router)
@@ -130,6 +154,9 @@ api.include_router(shadow.router)
 api.include_router(zombie.router)
 api.include_router(anomalies.router)
 api.include_router(traffic.router)
+api.include_router(privacy.router)
+api.include_router(orgs.router)
+api.include_router(ml_models.router)
 app.include_router(api)
 
 

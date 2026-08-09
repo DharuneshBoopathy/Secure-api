@@ -7,6 +7,7 @@ import re
 
 import bcrypt as _bcrypt
 import jwt
+import pyotp
 
 from app.config import get_settings
 
@@ -47,6 +48,35 @@ class Role(str, Enum):
         return self.level() <= other.level()
 
     def __lt__(self, other: "Role") -> bool:  # type: ignore[override]
+        return self.level() < other.level()
+
+
+# ---------------------------------------------------------------------------
+# Org role enum – three-tier per-organization RBAC (distinct from the
+# platform-level Role above; see docs/adr/002-multi-tenancy-schema.md)
+# ---------------------------------------------------------------------------
+class OrgRole(str, Enum):
+    OWNER = "owner"
+    EDITOR = "editor"
+    VIEWER = "viewer"
+
+    @classmethod
+    def has_value(cls, value: str) -> bool:
+        return value in cls._value2member_map_
+
+    def level(self) -> int:
+        return {OrgRole.VIEWER: 0, OrgRole.EDITOR: 1, OrgRole.OWNER: 2}[self]
+
+    def __ge__(self, other: "OrgRole") -> bool:  # type: ignore[override]
+        return self.level() >= other.level()
+
+    def __gt__(self, other: "OrgRole") -> bool:  # type: ignore[override]
+        return self.level() > other.level()
+
+    def __le__(self, other: "OrgRole") -> bool:  # type: ignore[override]
+        return self.level() <= other.level()
+
+    def __lt__(self, other: "OrgRole") -> bool:  # type: ignore[override]
         return self.level() < other.level()
 
 
@@ -93,6 +123,25 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+API_KEY_PREFIX = "amk_"  # "api monitor key" — helps secret scanners flag leaked keys
+
+# How long an SSE stream ticket stays valid. Only has to cover the round trip
+# between minting the ticket and opening the EventSource, so it is deliberately
+# far shorter than an access token — the whole point is that a ticket found in
+# a log is almost certainly already expired.
+STREAM_TICKET_TTL_SECONDS = 60
+
+
+def generate_api_key() -> str:
+    return API_KEY_PREFIX + secrets.token_urlsafe(32)
+
+
+def api_key_display_prefix(raw_key: str) -> str:
+    """First few characters kept for display after creation — never enough
+    to reconstruct or brute-force the rest of the key."""
+    return raw_key[: len(API_KEY_PREFIX) + 8]
+
+
 def hash_token(token: str) -> str:
     """Return the SHA-256 hex digest of a token string.
 
@@ -109,6 +158,31 @@ def create_access_token(subject: str) -> tuple[str, datetime]:
     payload: dict[str, Any] = {"sub": subject, "type": "access", "exp": expires}
     token = jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
     return token, expires
+
+
+def create_stream_ticket(subject: str, org_id: int) -> tuple[str, int]:
+    """Mint a short-lived, single-purpose credential for the SSE endpoints.
+
+    EventSource cannot send an Authorization header, so a browser opening a
+    stream has no way to present a normal bearer token — which is why the
+    stream URLs used to carry the full access token as a query parameter, and
+    why that token then appeared verbatim in every access log along the path.
+
+    A ticket exists to bound that exposure rather than eliminate it: it is
+    valid for a minute, and its distinct ``type`` means the REST API refuses
+    it, so a ticket recovered from a log is worth far less than the access
+    token it replaces.
+
+    The organization is baked in at mint time. EventSource can't send the
+    X-Org-Id header either, so without this the stream would fall back to
+    "the caller's only membership" and simply 400 for anyone who belongs to
+    more than one org.
+    """
+    settings = get_settings()
+    expires = utc_now() + timedelta(seconds=STREAM_TICKET_TTL_SECONDS)
+    payload: dict[str, Any] = {"sub": subject, "type": "stream", "org": org_id, "exp": expires}
+    token = jwt.encode(payload, settings.secret_key, algorithm=settings.jwt_algorithm)
+    return token, STREAM_TICKET_TTL_SECONDS
 
 
 def create_refresh_token(subject: str) -> tuple[str, datetime]:
@@ -131,3 +205,27 @@ def create_refresh_token(subject: str) -> tuple[str, datetime]:
 def decode_token(token: str) -> dict[str, Any]:
     settings = get_settings()
     return jwt.decode(token, settings.secret_key, algorithms=[settings.jwt_algorithm])
+
+
+# ---------------------------------------------------------------------------
+# TOTP-based MFA (RFC 6238)
+# ---------------------------------------------------------------------------
+
+MFA_ISSUER = "API Security Monitor"
+
+
+def generate_totp_secret() -> str:
+    return pyotp.random_base32()
+
+
+def build_totp_uri(secret: str, username: str) -> str:
+    """otpauth:// URI for QR-code provisioning in an authenticator app."""
+    return pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name=MFA_ISSUER)
+
+
+def verify_totp(secret: str, code: str) -> bool:
+    """Accept the current code plus one 30s step of clock drift either way."""
+    try:
+        return pyotp.totp.TOTP(secret).verify(code, valid_window=1)
+    except Exception:
+        return False

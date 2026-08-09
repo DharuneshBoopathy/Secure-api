@@ -1,7 +1,8 @@
 """Authentication, registration, and user-management routes."""
 
 import logging
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from slowapi import Limiter
@@ -10,13 +11,20 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.deps import get_current_user, require_role
-from app.models import RefreshToken, User
+from app.deps import OrgContext, get_current_user, get_org_context, require_role
+from app.models import ApiKey, Organization, OrgMembership, PasswordResetToken, RefreshToken, User
 from app.schemas import (
     AdminCreateUserIn,
+    ApiKeyCreatedOut,
+    ApiKeyCreateIn,
+    ApiKeyOut,
     AuthOut,
     ChangePasswordIn,
     LoginIn,
+    MfaCodeIn,
+    MfaEnrollOut,
+    PasswordResetConfirmIn,
+    PasswordResetRequestIn,
     RegisterIn,
     TokenRefreshIn,
     UserOut,
@@ -26,21 +34,33 @@ from app.security import (
     DUMMY_PASSWORD_HASH,
     PasswordValidationError,
     Role,
+    api_key_display_prefix,
+    build_totp_uri,
     create_access_token,
     create_refresh_token,
+    create_stream_ticket,
     decode_token,
+    generate_api_key,
+    generate_totp_secret,
     hash_password,
     hash_token,
     utc_now,
     validate_password_strength,
     verify_password,
+    verify_totp,
 )
+from app.services import mailer
 from app.services.audit_service import log_audit_event
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-limiter = Limiter(key_func=get_remote_address)
+# In-memory (default) means rate limits are per-process — correct for one
+# replica, but each replica behind nginx enforces its own separate counters
+# once you run more than one, silently multiplying the effective limit.
+# Setting REDIS_URL makes limits correct cluster-wide (see the "worker"
+# service in docker-compose.yml, which sets it alongside "web").
+limiter = Limiter(key_func=get_remote_address, storage_uri=get_settings().redis_url or "memory://")
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +85,36 @@ def _build_auth_out(user: User, access_token: str, access_exp: datetime, refresh
 # Public: login / register / refresh / logout
 # ---------------------------------------------------------------------------
 
+def _lockout_seconds(settings, failed_count: int) -> int:
+    """Exponential backoff duration for the (failed_count - threshold)th lockout."""
+    over = failed_count - settings.login_lockout_threshold
+    return min(
+        settings.login_lockout_base_seconds * (2**over),
+        settings.login_lockout_max_seconds,
+    )
+
+
 @router.post("/login")
 @limiter.limit("5/minute")
 def login(request: Request, body: LoginIn, db: Session = Depends(get_db)) -> AuthOut:
+    settings = get_settings()
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
     user = db.query(User).filter(User.username == body.username, User.is_active.is_(True)).one_or_none()
+
+    if user is not None and user.locked_until is not None and user.locked_until > utc_now():
+        log_audit_event(
+            db,
+            event_type="login_attempt",
+            actor=body.username,
+            target="auth/login",
+            ip=ip,
+            user_agent=user_agent,
+            success=False,
+            details={"reason": "account_locked"},
+        )
+        raise HTTPException(status_code=423, detail="Account temporarily locked due to repeated failed logins")
+
     # Always run a bcrypt comparison so response time does not leak whether
     # the username exists.  When the user is missing we hash against a
     # module-level dummy; the result is discarded.
@@ -77,18 +123,56 @@ def login(request: Request, body: LoginIn, db: Session = Depends(get_db)) -> Aut
         ok = False
     else:
         ok = verify_password(body.password, user.password_hash)
+
+    # MFA is only checked once the password itself is correct — this
+    # intentionally reveals "MFA required" solely to a caller who already
+    # holds valid credentials, matching standard second-factor UX.
+    failure_detail = "Invalid credentials"
+    failure_reason = None
+    if ok and user is not None and user.role == Role.ADMIN.value and user.mfa_enabled:
+        if not body.mfa_code:
+            ok = False
+            failure_detail = "MFA code required"
+            failure_reason = "mfa_code_required"
+        elif not verify_totp(user.mfa_secret or "", body.mfa_code):
+            ok = False
+            failure_detail = "Invalid MFA code"
+            failure_reason = "mfa_code_invalid"
+
     if not ok:
+        if user is not None:
+            user.failed_login_count += 1
+            if user.failed_login_count >= settings.login_lockout_threshold:
+                seconds = _lockout_seconds(settings, user.failed_login_count)
+                user.locked_until = utc_now() + timedelta(seconds=seconds)
+                db.commit()
+                log_audit_event(
+                    db,
+                    event_type="account_locked",
+                    actor=user.username,
+                    target="auth/login",
+                    ip=ip,
+                    user_agent=user_agent,
+                    success=False,
+                    details={"failed_login_count": user.failed_login_count, "locked_for_seconds": seconds},
+                )
+            else:
+                db.commit()
         log_audit_event(
             db,
             event_type="login_attempt",
             actor=body.username,
             target="auth/login",
-            ip=request.client.host if request.client else None,
-            user_agent=request.headers.get("user-agent"),
+            ip=ip,
+            user_agent=user_agent,
             success=False,
+            details={"reason": failure_reason} if failure_reason else None,
         )
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail=failure_detail)
+
     assert user is not None  # nosec B101 - type narrowing only; user is non-None when ok=True
+    user.failed_login_count = 0
+    user.locked_until = None
     access_token, access_exp = create_access_token(user.username)
     refresh_token, refresh_exp = create_refresh_token(user.username)
     db.add(RefreshToken(user_id=user.id, token=hash_token(refresh_token), expires_at=refresh_exp, revoked=False))
@@ -98,8 +182,8 @@ def login(request: Request, body: LoginIn, db: Session = Depends(get_db)) -> Aut
         event_type="login_attempt",
         actor=user.username,
         target="auth/login",
-        ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
+        ip=ip,
+        user_agent=user_agent,
         success=True,
     )
     return _build_auth_out(user, access_token, access_exp, refresh_token)
@@ -213,6 +297,24 @@ def refresh(request: Request, body: TokenRefreshIn, db: Session = Depends(get_db
     return _build_auth_out(user, access_token, access_exp, new_refresh)
 
 
+@router.post("/stream-ticket")
+@limiter.limit("60/minute")
+def issue_stream_ticket(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
+) -> dict:
+    """Exchange a normal header credential for a short-lived SSE ticket.
+
+    This request carries its credential in headers as usual; only the ticket
+    it returns ever appears in a URL. The limit is generous because the
+    browser re-mints on every stream reconnect, and EventSource reconnects on
+    any transient network blip.
+    """
+    ticket, expires_in = create_stream_ticket(current_user.username, ctx.org_id)
+    return {"ticket": ticket, "expires_in": expires_in}
+
+
 @router.post("/logout")
 @limiter.limit("20/minute")
 def logout(request: Request, body: TokenRefreshIn, db: Session = Depends(get_db)) -> dict:
@@ -221,6 +323,124 @@ def logout(request: Request, body: TokenRefreshIn, db: Session = Depends(get_db)
         row.revoked = True
         db.commit()
     return {"logged_out": True}
+
+
+# ---------------------------------------------------------------------------
+# Public: password reset (forgot password)
+# ---------------------------------------------------------------------------
+
+_RESET_REQUEST_GENERIC_RESPONSE = {
+    "message": "If an account with that email exists, a password reset link has been sent."
+}
+
+
+@router.post("/password-reset/request")
+@limiter.limit("5/minute")
+def request_password_reset(request: Request, body: PasswordResetRequestIn, db: Session = Depends(get_db)) -> dict:
+    """Issue a short-lived, single-use password reset token.
+
+    Always returns the same generic response whether or not the email is
+    registered, so this endpoint cannot be used to enumerate accounts.
+    """
+    settings = get_settings()
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    user = db.query(User).filter(User.email == body.email, User.is_active.is_(True)).one_or_none()
+    if user is None:
+        return _RESET_REQUEST_GENERIC_RESPONSE
+
+    raw_token = secrets.token_urlsafe(32)
+    expires = utc_now() + timedelta(minutes=settings.password_reset_token_expire_minutes)
+    db.add(PasswordResetToken(user_id=user.id, token=hash_token(raw_token), expires_at=expires, used=False))
+    db.commit()
+    log_audit_event(
+        db,
+        event_type="password_reset_requested",
+        actor=user.username,
+        target=f"user/{user.id}",
+        ip=ip,
+        user_agent=user_agent,
+        success=True,
+    )
+    # The token must reach the account owner and nobody else. It is never
+    # logged in production and never returned in the response: application
+    # logs are routinely shipped to a log aggregator, and a reset token in
+    # that stream is an account-takeover primitive for everyone with log read
+    # access.
+    if mailer.is_configured() and user.email:
+        try:
+            mailer.send_password_reset(to=user.email, username=user.username, token=raw_token)
+        except Exception:
+            # Don't leak delivery failure to the caller — the response is
+            # deliberately identical for known and unknown addresses, and
+            # varying it here would reintroduce account enumeration.
+            log.exception("Password reset email to user '%s' failed to send", user.username)
+    elif settings.app_env == "production":
+        log.error(
+            "Password reset requested for '%s' but no SMTP transport is configured; the token "
+            "was discarded. Set SMTP_HOST to enable self-service reset, or reset this account "
+            "manually as an administrator.",
+            user.username,
+        )
+    else:
+        # Local development without a mail server: log it so the flow can be
+        # completed by hand. Guarded on non-production precisely because this
+        # line is the leak the rest of this block exists to avoid.
+        log.warning(
+            "Password reset requested for '%s'. DEV ONLY — deliver out-of-band: %s",
+            user.username,
+            raw_token,
+        )
+    return _RESET_REQUEST_GENERIC_RESPONSE
+
+
+@router.post("/password-reset/confirm")
+@limiter.limit("5/minute")
+def confirm_password_reset(request: Request, body: PasswordResetConfirmIn, db: Session = Depends(get_db)) -> dict:
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+    token_hash = hash_token(body.token)
+    row = (
+        db.query(PasswordResetToken)
+        .filter(PasswordResetToken.token == token_hash, PasswordResetToken.used.is_(False))
+        .one_or_none()
+    )
+    if row is None or row.expires_at <= utc_now():
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    user = db.query(User).filter(User.id == row.user_id, User.is_active.is_(True)).one_or_none()
+    if user is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    try:
+        validate_password_strength(body.new_password)
+    except PasswordValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    user.password_hash = hash_password(body.new_password)
+    user.failed_login_count = 0
+    user.locked_until = None
+    row.used = True
+    # Invalidate any other outstanding reset tokens for this user so an
+    # older, still-valid token can't be used after the password has changed.
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.id, PasswordResetToken.used.is_(False)
+    ).update({"used": True})
+    # A password reset should kill every existing session, not just future logins.
+    db.query(RefreshToken).filter(
+        RefreshToken.user_id == user.id, RefreshToken.revoked.is_(False)
+    ).update({"revoked": True})
+    db.commit()
+    log_audit_event(
+        db,
+        event_type="password_reset_completed",
+        actor=user.username,
+        target=f"user/{user.id}",
+        ip=ip,
+        user_agent=user_agent,
+        success=True,
+    )
+    return {"message": "Password has been reset successfully"}
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +480,80 @@ def change_password(
         success=True,
     )
     return {"message": "Password updated successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Admin: TOTP MFA enrollment
+#
+# Restricted to the admin role — the role that holds full audit-log and
+# user-management power is the one that needs a second factor. Enrollment
+# requires proof of possession (one valid code) before mfa_enabled flips on,
+# and disabling requires a valid code too, so a hijacked session token alone
+# can't silently strip MFA off the account.
+# ---------------------------------------------------------------------------
+
+@router.post("/mfa/enroll")
+@limiter.limit("5/minute")
+def mfa_enroll(
+    request: Request,
+    current_user: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> MfaEnrollOut:
+    """Begin TOTP enrollment. MFA stays disabled until confirmed with a valid code."""
+    secret = generate_totp_secret()
+    current_user.mfa_secret = secret
+    current_user.mfa_enabled = False
+    db.commit()
+    return MfaEnrollOut(secret=secret, otpauth_uri=build_totp_uri(secret, current_user.username))
+
+
+@router.post("/mfa/enroll/confirm")
+@limiter.limit("5/minute")
+def mfa_enroll_confirm(
+    request: Request,
+    body: MfaCodeIn,
+    current_user: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not current_user.mfa_secret or not verify_totp(current_user.mfa_secret, body.code):
+        raise HTTPException(status_code=400, detail="Invalid MFA code")
+    current_user.mfa_enabled = True
+    db.commit()
+    log_audit_event(
+        db,
+        event_type="mfa_enabled",
+        actor=current_user.username,
+        target=f"user/{current_user.id}",
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+    )
+    return {"mfa_enabled": True}
+
+
+@router.post("/mfa/disable")
+@limiter.limit("5/minute")
+def mfa_disable(
+    request: Request,
+    body: MfaCodeIn,
+    current_user: User = Depends(require_role(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    if not current_user.mfa_enabled or not current_user.mfa_secret or not verify_totp(current_user.mfa_secret, body.code):
+        raise HTTPException(status_code=400, detail="Invalid MFA code")
+    current_user.mfa_enabled = False
+    current_user.mfa_secret = None
+    db.commit()
+    log_audit_event(
+        db,
+        event_type="mfa_disabled",
+        actor=current_user.username,
+        target=f"user/{current_user.id}",
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+    )
+    return {"mfa_enabled": False}
 
 
 # ---------------------------------------------------------------------------
@@ -392,6 +686,91 @@ def delete_user(
 
 
 # ---------------------------------------------------------------------------
+# Admin: per-integration API keys
+#
+# Replaces relying solely on the single static MONITOR_API_KEY (still
+# accepted for backward compatibility) for automation clients — each
+# integration gets its own revocable credential, capped at editor/viewer, so
+# one compromised key doesn't require rotating the shared secret for
+# everyone.
+# ---------------------------------------------------------------------------
+
+@router.post("/api-keys", status_code=201, dependencies=[Depends(require_role(Role.ADMIN))])
+@limiter.limit("10/minute")
+def create_api_key(
+    request: Request,
+    body: ApiKeyCreateIn,
+    admin: User = Depends(require_role(Role.ADMIN)),
+    ctx: OrgContext = Depends(get_org_context),
+    db: Session = Depends(get_db),
+) -> ApiKeyCreatedOut:
+    """Issue a new per-integration API key, scoped to one organization (the
+    caller's org via X-Org-Id, or their sole membership). The plaintext is
+    returned exactly once — only its hash and a short display prefix are
+    stored."""
+    raw_key = generate_api_key()
+    row = ApiKey(
+        org_id=ctx.org_id,
+        name=body.name,
+        key_hash=hash_token(raw_key),
+        key_prefix=api_key_display_prefix(raw_key),
+        role=body.role,
+        created_by=admin.id,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    log_audit_event(
+        db,
+        event_type="api_key_created",
+        actor=admin.username,
+        target=f"api_key/{row.id}",
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        details={"name": row.name, "role": row.role},
+    )
+    return ApiKeyCreatedOut(id=row.id, name=row.name, role=row.role, key_prefix=row.key_prefix, api_key=raw_key)
+
+
+@router.get("/api-keys", dependencies=[Depends(require_role(Role.ADMIN))])
+def list_api_keys(ctx: OrgContext = Depends(get_org_context), db: Session = Depends(get_db)) -> list[ApiKeyOut]:
+    rows = (
+        db.query(ApiKey)
+        .filter(ApiKey.org_id == ctx.org_id)
+        .order_by(ApiKey.created_at.desc())
+        .all()
+    )
+    return [ApiKeyOut.model_validate(r) for r in rows]
+
+
+@router.delete("/api-keys/{key_id}", status_code=204)
+def revoke_api_key(
+    request: Request,
+    key_id: int,
+    admin: User = Depends(require_role(Role.ADMIN)),
+    ctx: OrgContext = Depends(get_org_context),
+    db: Session = Depends(get_db),
+) -> None:
+    row = db.query(ApiKey).filter(ApiKey.id == key_id, ApiKey.org_id == ctx.org_id).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    row.revoked = True
+    row.revoked_at = utc_now()
+    db.commit()
+    log_audit_event(
+        db,
+        event_type="api_key_revoked",
+        actor=admin.username,
+        target=f"api_key/{row.id}",
+        ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+        success=True,
+        details={"name": row.name},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Bootstrap: ensure default admin exists on startup
 # ---------------------------------------------------------------------------
 
@@ -441,3 +820,29 @@ def ensure_default_admin(db: Session) -> None:
                 "been rotated to the ADMIN_PASSWORD value from the environment.",
                 settings.admin_username,
             )
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap: ensure a default organization exists on startup
+#
+# Covers the fresh-install path: migration 178fc3029731 only backfills a
+# Default Organization when it finds existing users at migration time (an
+# in-place upgrade of a populated single-tenant deployment). A brand-new
+# install runs that migration with zero users, so there's nothing to
+# backfill yet — this runs after ensure_default_admin() (which is what
+# actually creates the first user) to cover that case too.
+# ---------------------------------------------------------------------------
+
+def ensure_default_organization(db: Session) -> None:
+    if db.query(Organization).filter(Organization.slug == "default").one_or_none() is not None:
+        return
+    settings = get_settings()
+    admin = db.query(User).filter(User.username == settings.admin_username).one_or_none()
+    if admin is None:
+        return
+    org = Organization(name="Default Organization", slug="default", owner_user_id=admin.id)
+    db.add(org)
+    db.flush()
+    db.add(OrgMembership(user_id=admin.id, org_id=org.id, role="owner", status="active"))
+    db.commit()
+    log.info("Default Organization created (owner: '%s').", admin.username)

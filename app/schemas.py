@@ -71,6 +71,16 @@ class OpenAPIUpload(BaseModel):
     spec_yaml: str
 
 
+class PostmanUpload(BaseModel):
+    title: str = "Registered API"
+    collection_json: str
+
+
+class CurlUpload(BaseModel):
+    title: str = "Registered API"
+    commands: str
+
+
 class AlertOut(BaseModel):
     id: int
     created_at: datetime
@@ -81,6 +91,24 @@ class AlertOut(BaseModel):
     method: str | None
     path: str | None
     acknowledged: bool
+    event_id: int | None = None
+    explanation: list[dict] | dict | None = None
+    feedback: str | None = None
+    feedback_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AlertFeedbackIn(BaseModel):
+    label: Literal["true_positive", "false_positive"]
+
+
+class MLModelVersionOut(BaseModel):
+    id: int
+    updated_at: datetime
+    sklearn_version: str
+    is_active: bool
+    sample_count: int
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -108,6 +136,16 @@ class StatsOut(BaseModel):
     discovered_undocumented: int
     open_alerts: int
     known_endpoints: int
+
+
+class TrafficTrendPoint(BaseModel):
+    """One day in the traffic-volume series. ``day`` is an ISO date string
+    (YYYY-MM-DD) rather than a datetime — the series is day-granular and a
+    timestamp would imply a precision the underlying rollup doesn't have."""
+
+    day: str
+    requests: int
+    errors: int
 
 
 class ShadowOut(BaseModel):
@@ -180,6 +218,18 @@ class TrafficEventOut(BaseModel):
 class LoginIn(BaseModel):
     username: str = Field(min_length=3, max_length=128)
     password: str = Field(min_length=8, max_length=256)
+    # Required only when the account has MFA enabled; a TOTP code is 6 digits
+    # but the field is left slightly wider to tolerate whitespace-trimmed input.
+    mfa_code: str | None = Field(default=None, min_length=6, max_length=10)
+
+
+class MfaEnrollOut(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class MfaCodeIn(BaseModel):
+    code: str = Field(min_length=6, max_length=10)
 
 
 class RegisterIn(BaseModel):
@@ -219,8 +269,86 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     created_at: datetime
+    mfa_enabled: bool = False
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PasswordResetRequestIn(BaseModel):
+    email: str = Field(min_length=5, max_length=256, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class PasswordResetConfirmIn(BaseModel):
+    token: str = Field(min_length=10, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
+
+
+class ApiKeyCreateIn(BaseModel):
+    name: str = Field(min_length=3, max_length=128)
+    # Capped below admin — these are for unattended automation clients, not
+    # interactive account management.
+    role: str = Field(default="editor", pattern=r"^(editor|viewer)$")
+
+
+class ApiKeyCreatedOut(BaseModel):
+    id: int
+    name: str
+    role: str
+    key_prefix: str
+    api_key: str  # plaintext — shown exactly once, at creation
+
+
+class ApiKeyOut(BaseModel):
+    id: int
+    name: str
+    role: str
+    key_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked: bool
+    revoked_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrgCreateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+
+
+class OrgOut(BaseModel):
+    id: int
+    name: str
+    slug: str
+    owner_user_id: int
+    created_at: datetime
+    my_role: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrgRenameIn(BaseModel):
+    name: str = Field(min_length=2, max_length=128)
+
+
+class OrgTransferOwnershipIn(BaseModel):
+    new_owner_user_id: int
+
+
+class OrgMembershipOut(BaseModel):
+    id: int
+    user_id: int
+    username: str
+    org_id: int
+    role: str
+    status: str
+    created_at: datetime
+    decided_at: datetime | None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrgMembershipRoleIn(BaseModel):
+    role: str = Field(pattern=r"^(owner|editor|viewer)$")
 
 
 class TokenRefreshIn(BaseModel):
@@ -246,3 +374,49 @@ class AuditOut(BaseModel):
     success: bool
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# --- Key-based API onboarding (app/routers/connections.py) -------------------
+
+class ProviderOut(BaseModel):
+    """One entry of the built-in provider catalog, for populating the UI's
+    provider picker — key format hints and endpoint counts come from the
+    server so the two never drift."""
+
+    id: str
+    label: str
+    base_url: str
+    key_hint: str
+    docs_url: str | None
+    endpoint_count: int
+    requires_base_url: bool
+
+
+class ConnectedApiCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(max_length=32)
+    name: str = Field(min_length=1, max_length=128)
+    api_key: str = Field(min_length=8, max_length=512)
+    # Custom provider only; ignored for catalog providers, whose base URL and
+    # verify path are fixed so a saved connection can't be pointed elsewhere.
+    base_url: str | None = Field(default=None, max_length=512)
+    verify_path: str | None = Field(default=None, max_length=512)
+    # Custom provider only: newline-separated "METHOD /path" lines.
+    endpoints: str | None = Field(default=None, max_length=20_000)
+    # Probe the provider during creation. Off = save now, verify later.
+    verify: bool = True
+
+
+class ConnectedApiOut(BaseModel):
+    id: int
+    name: str
+    provider: str
+    provider_label: str
+    base_url: str
+    key_masked: str
+    endpoints_registered: int
+    status: str
+    last_checked_at: datetime | None
+    last_check_detail: str | None
+    created_at: datetime

@@ -1,6 +1,17 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Index, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -8,11 +19,43 @@ from app.database import Base
 from app.security import utc_now
 
 
-class KnownEndpoint(Base):
-    __tablename__ = "known_endpoints"
-    __table_args__ = (UniqueConstraint("method", "path_template", name="uq_known_method_path"),)
+class Organization(Base):
+    __tablename__ = "organizations"
+    __table_args__ = (UniqueConstraint("slug", name="uq_org_slug"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128))
+    slug: Mapped[str] = mapped_column(String(128), index=True)
+    # Denormalized pointer to the current primary owner for fast display
+    # (org switcher, member lists). OrgMembership rows remain the source of
+    # truth for access control — this is never read for authorization.
+    owner_user_id: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class OrgMembership(Base):
+    """A user's role within one organization. status="pending" rows have no
+    access until an owner approves them; "revoked" rows are kept (not
+    deleted) so membership history survives removal."""
+
+    __tablename__ = "org_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "org_id", name="uq_membership_user_org"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
+    role: Mapped[str] = mapped_column(String(32), default="viewer")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class KnownEndpoint(Base):
+    __tablename__ = "known_endpoints"
+    __table_args__ = (UniqueConstraint("org_id", "method", "path_template", name="uq_known_method_path"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path_template: Mapped[str] = mapped_column(String(512), index=True)
     source: Mapped[str] = mapped_column(String(64), default="openapi")
@@ -28,9 +71,11 @@ class TrafficEvent(Base):
         Index("ix_traffic_method_path_ts", "method", "path", "ts", mysql_length={"path": 191}),
         # Accelerates the 30-day zombie scanner which filters by is_documented then orders by ts.
         Index("ix_traffic_doc_ts", "is_documented", "ts"),
+        Index("ix_traffic_org_ts", "org_id", "ts"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     ts: Mapped[datetime] = mapped_column(DateTime, index=True, default=utc_now)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -62,6 +107,7 @@ class DiscoveredEndpoint(Base):
     __table_args__ = (
         Index(
             "uq_disc_method_path",
+            "org_id",
             "method",
             "path_normalized",
             unique=True,
@@ -70,6 +116,7 @@ class DiscoveredEndpoint(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path_normalized: Mapped[str] = mapped_column(String(1024), nullable=False)
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
@@ -82,6 +129,7 @@ class Alert(Base):
     __tablename__ = "alerts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now, index=True)
     alert_type: Mapped[str] = mapped_column(String(64), index=True)
     severity: Mapped[str] = mapped_column(String(16), index=True)
@@ -90,35 +138,69 @@ class Alert(Base):
     method: Mapped[str | None] = mapped_column(String(16), nullable=True)
     path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False)
+    # The specific TrafficEvent this alert was raised from, when there is one
+    # (traffic_anomaly / undocumented_api alerts). No FK, per this codebase's
+    # existing no-FK-constraint convention. Lets feedback on an alert be
+    # traced back to the exact training row for the ML retrain loop.
+    event_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
+    # Top contributing features for anomaly alerts, e.g.
+    # [{"feature": "query_entropy", "value": 5.1, "baseline_mean": 1.2, "z_score": 4.3}, ...]
+    explanation: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    # Human feedback on whether this alert was a real finding, for the ML retrain loop.
+    feedback: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    feedback_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class OpenAPISnapshot(Base):
     __tablename__ = "openapi_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     title: Mapped[str] = mapped_column(String(256))
     version: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    raw_yaml: Mapped[str] = mapped_column(LONGTEXT)
+    # LONGTEXT on MySQL (specs routinely exceed TEXT's 64 KB limit), plain
+    # TEXT everywhere else. The variant keeps the production DDL identical
+    # while letting SQLite — used by the test suite and by the no-Docker
+    # local-dev path — compile this table at all; LONGTEXT has no SQLite
+    # rendering, so a bare LONGTEXT() fails at CREATE TABLE time there.
+    raw_yaml: Mapped[str] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"))
 
 
 class MLModelState(Base):
+    """Versioned per-org model snapshots. Multiple rows per org are kept
+    (bounded by MAX_MODEL_VERSIONS in ml_anomaly.py) so a bad retrain can be
+    rolled back; exactly one row per org has is_active=True at a time, and
+    that is the row load_model() uses for scoring."""
+
     __tablename__ = "ml_model_state"
+    __table_args__ = (Index("ix_ml_model_org_active", "org_id", "is_active"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
     sklearn_version: Mapped[str] = mapped_column(String(32))
     blob: Mapped[bytes] = mapped_column(LargeBinary)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class ShadowEndpoint(Base):
     __tablename__ = "shadow_endpoints"
     __table_args__ = (
-        Index("ix_shadow_method_path", "method", "path_normalized", unique=True, mysql_length={"path_normalized": 191}),
+        Index(
+            "ix_shadow_method_path",
+            "org_id",
+            "method",
+            "path_normalized",
+            unique=True,
+            mysql_length={"path_normalized": 191},
+        ),
         Index("ix_shadow_risk", "risk_score", "hit_count"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path_normalized: Mapped[str] = mapped_column(String(1024), nullable=False)
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
@@ -135,9 +217,10 @@ class ShadowEndpoint(Base):
 
 class ZombieEndpointState(Base):
     __tablename__ = "zombie_endpoint_state"
-    __table_args__ = (UniqueConstraint("method", "path_template", name="uq_zombie_method_path"),)
+    __table_args__ = (UniqueConstraint("org_id", "method", "path_template", name="uq_zombie_method_path"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path_template: Mapped[str] = mapped_column(String(512), index=True)
     last_request_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
@@ -157,6 +240,7 @@ class TrafficDailySummary(Base):
     __table_args__ = (
         Index(
             "uq_summary_day_method_path",
+            "org_id",
             "day",
             "method",
             "path_normalized",
@@ -167,6 +251,7 @@ class TrafficDailySummary(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
     day: Mapped[datetime] = mapped_column(DateTime, index=True)
     method: Mapped[str] = mapped_column(String(16), index=True)
     path_normalized: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -189,6 +274,13 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), default="viewer")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # TOTP secret is stored as soon as enrollment starts but mfa_enabled stays
+    # False until the user proves possession by submitting one valid code —
+    # otherwise a client-side error mid-enrollment could silently lock login.
+    mfa_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class RefreshToken(Base):
@@ -204,6 +296,86 @@ class RefreshToken(Base):
     token: Mapped[str] = mapped_column(String(64), index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class ApiKey(Base):
+    """Per-integration API key. Replaces relying solely on the single static
+    MONITOR_API_KEY for automation clients — each integration gets its own
+    revocable credential and audit trail, capped at editor/viewer (never
+    admin) since these are meant for unattended automation, not interactive
+    account management."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    # Stores the SHA-256 hex digest of the issued key, never the plaintext.
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # First few characters of the plaintext key, kept for display/identification
+    # in the admin UI so an operator can tell keys apart without ever seeing
+    # the full secret again after creation.
+    key_prefix: Mapped[str] = mapped_column(String(16))
+    role: Mapped[str] = mapped_column(String(32), default="editor")
+    created_by: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MonitoredApi(Base):
+    """An upstream API onboarded by pasting its access key instead of a spec.
+
+    Complements OpenAPISnapshot: that path suits an API you own and have a
+    YAML file for, this one suits a third-party API (Claude, Gemini, OpenAI)
+    where all you hold is a key. Either way the durable result is the same set
+    of KnownEndpoint rows, so discovery / shadow / zombie / idle keep working
+    unchanged — the endpoints seeded from a connection carry
+    source="connection:<id>", which is also how they're found again when the
+    connection is deleted.
+
+    This is the only table holding a recoverable secret (see
+    app/services/crypto.py for why, and for what happens when the encryption
+    key rotates).
+    """
+
+    __tablename__ = "monitored_apis"
+    __table_args__ = (UniqueConstraint("org_id", "name", name="uq_monitored_api_org_name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    # Key into app.services.provider_catalog: "anthropic" | "openai" | "google" | "custom".
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    base_url: Mapped[str] = mapped_column(String(512))
+    verify_path: Mapped[str] = mapped_column(String(512), default="/")
+    # Fernet token, never the raw key. key_prefix/key_last4 are display-only,
+    # mirroring ApiKey.key_prefix — enough to tell two keys apart, never
+    # enough to use one.
+    credential_ciphertext: Mapped[str] = mapped_column(Text)
+    key_prefix: Mapped[str] = mapped_column(String(32))
+    key_last4: Mapped[str] = mapped_column(String(8), default="")
+    endpoints_registered: Mapped[int] = mapped_column(Integer, default=0)
+    # "unverified" | "active" | "invalid" | "error" — see app/services/provider_probe.py.
+    status: Mapped[str] = mapped_column(String(16), default="unverified", index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_check_detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_by: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (Index("ix_reset_user_used", "user_id", "used"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    # Stores the SHA-256 hex digest of the issued token, never the plaintext.
+    token: Mapped[str] = mapped_column(String(64), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_now)
 
 

@@ -1,17 +1,16 @@
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.config import get_settings
 from app.database import get_db
-from app.deps import require_role
+from app.deps import OrgContext, require_stream_org_role
 from app.models import TrafficEvent
 from app.routers.auth import limiter
-from app.security import Role, utc_now
+from app.security import OrgRole, utc_now
 
 router = APIRouter(prefix="/traffic", tags=["traffic"])
 
@@ -21,12 +20,9 @@ router = APIRouter(prefix="/traffic", tags=["traffic"])
 def stream_traffic(
     request: Request,
     db: Session = Depends(get_db),
-    auth: str | None = Query(default=None),
-    _user=Depends(require_role(Role.VIEWER)),
+    ctx: OrgContext = Depends(require_stream_org_role(OrgRole.VIEWER)),
 ):
-    settings = get_settings()
-    if auth and not auth.startswith("Bearer ") and auth != settings.monitor_api_key:
-        raise HTTPException(status_code=401, detail="Invalid stream auth token")
+    org_id = ctx.org_id
 
     async def event_stream():
         last_seen_id = 0
@@ -35,7 +31,7 @@ def stream_traffic(
             # the async event loop is never stalled while waiting for the DB.
             rows = await run_in_threadpool(
                 lambda lid=last_seen_id: db.query(TrafficEvent)
-                .filter(TrafficEvent.id > lid)
+                .filter(TrafficEvent.org_id == org_id, TrafficEvent.id > lid)
                 .order_by(TrafficEvent.id.asc())
                 .limit(25)
                 .all()
