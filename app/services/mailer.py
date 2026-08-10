@@ -50,6 +50,11 @@ def send_email(*, to: str, subject: str, body: str) -> None:
     # greeting. Choosing on the flag rather than the port keeps unusual
     # deployments (a relay on 2525, say) working.
     context = ssl.create_default_context()
+    # create_default_context() already negotiates TLS 1.2+ on the Python this
+    # ships with, but pinning the floor explicitly means the guarantee travels
+    # with the code rather than depending on the interpreter's defaults — and
+    # it survives someone running this on an older runtime.
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     if settings.smtp_use_ssl:
         with smtplib.SMTP_SSL(
             settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds, context=context

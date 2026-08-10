@@ -2,7 +2,10 @@
 FROM node:20-alpine AS frontend-build
 WORKDIR /fe
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+# --ignore-scripts: no package lifecycle script runs during install, so a
+# compromised transitive dependency cannot execute at build time. Verified
+# the vite/esbuild build still succeeds without them.
+RUN npm ci --ignore-scripts
 COPY frontend/ ./
 RUN npm run build
 
@@ -19,7 +22,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # happened to be on PyPI at build time. --require-hashes makes a tampered or
 # substituted artifact a build failure instead of a silent swap.
 COPY requirements.lock .
-RUN pip install --prefix=/install --no-cache-dir --require-hashes -r requirements.lock
+# --only-binary :all: refuses source distributions, so no setup.py executes
+# during install. Every package in the lock publishes a wheel for both
+# target architectures, so nothing is lost by requiring one.
+RUN pip install --prefix=/install --no-cache-dir --only-binary :all: \
+    --require-hashes -r requirements.lock
 
 # --- Runtime ---
 FROM python:3.12-slim AS runtime

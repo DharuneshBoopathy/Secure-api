@@ -81,7 +81,11 @@ class Settings(BaseSettings):
             )
         return val
 
-    database_url: str = "mysql+pymysql://apimonitor:apimonitor_secret@127.0.0.1:3306/apimonitor"
+    # No password in the default. It was a local convenience, but a credential
+    # literal in source is one copy-paste away from being a real one, and
+    # production refuses to start without DATABASE_URL set anyway
+    # (validate_security_settings below). Supply the full DSN via .env.
+    database_url: str = "mysql+pymysql://apimonitor@127.0.0.1:3306/apimonitor"
     monitor_api_key: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     secret_key: str = Field(default_factory=lambda: secrets.token_hex(32))
     jwt_algorithm: str = "HS256"

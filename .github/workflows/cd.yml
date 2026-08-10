@@ -29,7 +29,14 @@ on:
 
 jobs:
   build:
-    if: github.event.workflow_run.conclusion == 'success'
+    # The head_repository check is belt and braces on top of `branches: [main]`
+    # above: workflow_run carries the triggering run's head SHA, and this job
+    # checks that SHA out and builds it with packages:write. Requiring the run
+    # to have come from this repository means a fork can never reach the push
+    # credentials, independently of how the trigger filter behaves.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +50,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
@@ -58,8 +65,8 @@ jobs:
         env:
           PLATFORM: ${{ matrix.platform }}
 
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -69,7 +76,7 @@ jobs:
       # per-architecture digests into one tagged manifest list, so a tag never
       # points at a half-published set of architectures.
       - id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -81,7 +88,7 @@ jobs:
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digest-${{ env.PLATFORM_TAG }}
           path: /tmp/digests/*
@@ -97,14 +104,14 @@ jobs:
     outputs:
       image: ${{ steps.ref.outputs.image }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -154,12 +161,18 @@ jobs:
       name: production
       url: https://apimonitor.example.com
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+      # Passed through env rather than interpolated into the script body. A
+      # ${{ secrets.* }} expansion is substituted into the command text before
+      # the shell runs, so the value can surface in traces and is one `set -x`
+      # from the log; as an env var the runner's masking still applies.
       - name: Configure kubeconfig
-        run: echo "${{ secrets.KUBE_CONFIG_PRODUCTION }}" | base64 -d > kubeconfig.yaml
+        env:
+          KUBE_CONFIG_PRODUCTION: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+        run: printf '%s' "$KUBE_CONFIG_PRODUCTION" | base64 -d > kubeconfig.yaml
       - name: Run database migrations
         env:
           KUBECONFIG: kubeconfig.yaml

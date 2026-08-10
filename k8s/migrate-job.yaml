@@ -14,6 +14,11 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      # This Job talks to the database, never to the Kubernetes API, so the
+      # default-mounted service account token is credential it has no use for
+      # — and one more thing to steal if the migration image is ever tampered
+      # with.
+      automountServiceAccountToken: false
       containers:
         - name: migrate
           image: ghcr.io/OWNER/REPO:latest
@@ -23,3 +28,13 @@ spec:
                 name: apimonitor-config
             - secretRef:
                 name: apimonitor-secrets
+          # Alembic on this schema is not memory-hungry; the limit exists so an
+          # unbounded Job cannot compete with the web and worker pods for node
+          # memory. The other workloads declare limits already.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

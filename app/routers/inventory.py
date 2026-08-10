@@ -22,6 +22,12 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 # it exists for.
 RAW_RETENTION_DAYS = 30
 
+# Upper bound on the trend window. Declared once so the request validation and
+# the loop that materializes the series cannot drift apart: the bound is what
+# keeps a caller from asking for a series with millions of points, and it needs
+# to hold locally rather than only in the endpoint signature.
+MAX_TREND_DAYS = 365
+
 
 @router.get("/discovered")
 @limiter.limit("120/minute")
@@ -134,7 +140,7 @@ def traffic_trend(
     request: Request,
     ctx: OrgContext = Depends(require_org_role(OrgRole.VIEWER)),
     db: Session = Depends(get_db),
-    days: int = Query(default=30, ge=1, le=365),
+    days: int = Query(default=30, ge=1, le=MAX_TREND_DAYS),
 ) -> list[TrafficTrendPoint]:
     """Daily request/error counts over the last ``days`` days.
 
@@ -196,7 +202,7 @@ def traffic_trend(
     # Emit a dense series (zero-filled) so the chart doesn't silently
     # compress quiet days into a misleadingly smooth line.
     out: list[TrafficTrendPoint] = []
-    for offset in range(days):
+    for offset in range(min(days, MAX_TREND_DAYS)):
         day = (window_start + timedelta(days=offset)).date().isoformat()
         point = buckets.get(day, {"requests": 0, "errors": 0})
         out.append(TrafficTrendPoint(day=day, requests=point["requests"], errors=point["errors"]))

@@ -10,8 +10,8 @@ jobs:
   lint-and-type-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       # The lockfile is what actually ships (Dockerfile installs from it), so
@@ -47,19 +47,19 @@ jobs:
             -o /tmp/requirements.check
           diff <(grep -v '^#' requirements.lock) <(grep -v '^#' /tmp/requirements.check) \
             || { echo "::error::requirements.lock is stale — re-run: uv pip compile requirements.txt --generate-hashes --universal --python-version 3.12 -o requirements.lock"; exit 1; }
-      - run: pip install --require-hashes -r requirements.lock
+      - run: "pip install --only-binary :all: --require-hashes -r requirements.lock"
       # Pinned deliberately. These gate the build, and an unpinned linter makes
       # CI a function of the latest upstream release rather than of this
       # commit: ruff 0.16 widened its default rule set and failed a tree that
       # had not changed. ruff.toml fixes which rules run; this fixes which
       # implementation of them runs. Bump on purpose, not by surprise.
-      - run: pip install ruff==0.16.2 mypy==2.3.0
+      - run: "pip install --only-binary :all: ruff==0.16.2 mypy==2.3.0"
       - run: ruff check app
       - run: mypy app --ignore-missing-imports
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: frontend
       # Errors gate the build; the pre-existing warnings are visible in the
       # log without blocking. See eslint.config.js for which is which.
@@ -70,37 +70,29 @@ jobs:
 
   test-backend:
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: rootsecret
-          MYSQL_DATABASE: apimonitor
-          MYSQL_USER: apimonitor
-          MYSQL_PASSWORD: apimonitor_secret
-        ports: ["3306:3306"]
-        options: >-
-          --health-cmd="mysqladmin ping -h localhost -uroot -prootsecret"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - run: pip install --require-hashes -r requirements.lock
-      - run: pip install pytest pytest-cov pytest-asyncio httpx faker "fakeredis[lua]"
+      - run: "pip install --only-binary :all: --require-hashes -r requirements.lock"
+      # Pinned like the linters above so a tooling release cannot fail a build
+      # on unchanged code. httpx is intentionally absent — the lockfile above
+      # already installs it, pinned and hash-verified.
+      - run: >-
+          pip install --only-binary :all:
+          pytest==9.1.1 pytest-cov==7.1.0 pytest-asyncio==1.4.0
+          faker==40.36.0 "fakeredis[lua]==2.37.0"
       - run: pytest
 
   test-frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: frontend
       - run: npm run test
         working-directory: frontend
@@ -108,16 +100,16 @@ jobs:
   security-scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - run: pip install --require-hashes -r requirements.lock
+      - run: "pip install --only-binary :all: --require-hashes -r requirements.lock"
       # bandit is pinned for the same reason as ruff/mypy above — it is a
       # blocking gate, so a new release adding a check would fail an unchanged
       # tree. safety and pip-audit are informational below and float on
       # purpose: for those, "the advisory database got newer" is the point.
-      - run: pip install bandit==1.9.4 safety pip-audit
+      - run: "pip install --only-binary :all: bandit==1.9.4 safety==3.8.1 pip-audit==2.10.1"
       - run: bandit -r app
       - run: safety check || true
       # pip-audit checks the resolved environment against the PyPI/OSV
@@ -129,10 +121,10 @@ jobs:
       # informational until those floors are raised too — flip to blocking
       # (drop `|| true`) once a clean run is confirmed.
       - run: pip-audit || true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-      - run: npm ci
+      - run: npm ci --ignore-scripts
         working-directory: frontend
       # Blocking gate: production dependencies only, high/critical severity.
       # Dev-only tooling (vite/vitest/esbuild, etc.) never ships in the built
@@ -153,16 +145,16 @@ jobs:
       image: semgrep/semgrep
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: semgrep scan --config p/ci
 
   docker-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build -t secure-api-monitor:ci .
       # Informational: full severity range, visible in the job log, never blocks.
-      - uses: aquasecurity/trivy-action@v0.36.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: secure-api-monitor:ci
           format: table
@@ -173,7 +165,7 @@ jobs:
       # action the team can take. Not verified locally (no Docker daemon in
       # this environment) — watch the first run and adjust severity/ignore
       # rules if it surfaces something that isn't actionable.
-      - uses: aquasecurity/trivy-action@v0.36.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: secure-api-monitor:ci
           format: table

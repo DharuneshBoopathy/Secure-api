@@ -31,7 +31,13 @@ def test_hash_token_returns_64_char_hex():
 
 def test_hash_token_is_deterministic():
     t = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"
-    assert hash_token(t) == hash_token(t)
+    # Bound to separate names rather than compared inline: `f(x) == f(x)` is
+    # indistinguishable from a copy-paste mistake to both readers and static
+    # analysis, even though comparing two independent calls is exactly the
+    # point of a determinism test.
+    first = hash_token(t)
+    second = hash_token(t)
+    assert first == second
 
 
 def test_hash_token_matches_stdlib():
