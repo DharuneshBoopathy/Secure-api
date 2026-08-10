@@ -5,9 +5,14 @@ Alertmanager, Grafana, Loki/Promtail, Jaeger — onto a single always-free VM, b
 automatic HTTPS on a free subdomain.
 
 **Why this host.** No managed free tier (Render, Fly, Railway) offers a free MySQL plus
-nine long-running containers. Oracle's Always Free Ampere A1 allocation — 4 ARM cores,
-24 GB RAM, 200 GB of block storage, no time limit — runs the existing compose stack
+nine long-running containers. Oracle's Always Free Ampere A1 allocation — **2 ARM cores,
+12 GB RAM**, 200 GB of block storage, no time limit — runs the existing compose stack
 unchanged. All images used are multi-arch and have `linux/arm64` builds.
+
+> Oracle halved this allowance in June 2026; it was 4 OCPU / 24 GB before. 12 GB is still
+> roughly 2.5x what the stack reserves — the `deploy.resources.limits` in
+> `docker-compose.yml` total about 4.8 GB across all ten services — so nothing here needs
+> to change. If you find a 4 OCPU shape still offered in your tenancy, take it.
 
 **The trade.** You own the machine: patching, backups and uptime are yours. Budget about
 half an hour a month. If that is unwelcome, the `k8s/` manifests and
@@ -23,7 +28,8 @@ Everything below is done once. Redeploys afterwards are `git pull` + one compose
    verification; Always Free resources cannot incur charges. Stay on the Free Tier — do not
    upgrade to Pay As You Go.
 2. **Create instance**:
-   - Shape: **Ampere / `VM.Standard.A1.Flex`**, **4 OCPU, 24 GB memory**
+   - Shape: **Ampere / `VM.Standard.A1.Flex`**, **2 OCPU, 12 GB memory** (the Always Free
+     maximum since June 2026 — allocate all of it; unused capacity is not a saving)
    - Image: **Canonical Ubuntu 22.04** (aarch64 build)
    - Boot volume: 100 GB
    - Save the generated SSH private key — it cannot be downloaded again.
