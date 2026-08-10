@@ -597,9 +597,12 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
 free-tier deployment on an Oracle Cloud Always Free VM.
 
 For a public demo with no cloud account and no payment card,
-[docs/deployment-huggingface.md](docs/deployment-huggingface.md) runs the released
-image on a free Hugging Face Space — single container on SQLite, no worker or
-observability sidecars, storage reset on every restart.
+[docs/deployment-render.md](docs/deployment-render.md) runs the released image on
+Render's free plan — single container on SQLite, no worker or observability
+sidecars, sleeps when idle and resets storage on every deploy. Measured at
+184 MiB against the free plan's 512 MB cap.
+[docs/deployment-huggingface.md](docs/deployment-huggingface.md) covers the same
+shape on a Hugging Face Space, which needs a PRO account.
 
 ### Kubernetes
 

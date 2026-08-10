@@ -1,14 +1,24 @@
-# Deploying to Hugging Face Spaces (free, no credit card)
+# Deploying to Hugging Face Spaces (requires a PRO account)
 
-The fastest way to get a public, working instance online. Roughly ten minutes,
-most of it spent generating secrets.
+> **This is not a free option.** Per the
+> [Spaces documentation](https://huggingface.co/docs/hub/en/spaces-overview):
+> *"Gradio and Docker Spaces run on compute and require a paid plan to create:
+> PRO for personal accounts, Team or Enterprise for organizations. Static Spaces
+> are free for everyone."* A Docker Space therefore needs HF PRO (about $9/mo).
+> The **CPU Basic hardware** it runs on has no hourly cost — which is what the
+> hardware table shows, and it is easy to misread that as the Space being free —
+> but *creating* the Space is gated on the plan. Static Spaces are free but
+> serve only static files, so they cannot host this backend.
+>
+> For a genuinely free, cardless deployment use
+> **[deployment-render.md](deployment-render.md)** instead. Keep reading only if
+> you already have PRO, or decide it is worth it for the 2 vCPU / 16 GB tier.
 
-**Why this and not a cloud VM.** Oracle, Google Cloud, AWS and Azure all require
-a payment card for identity verification, even on tiers that never charge.
-Hugging Face does not — an account is free and cardless, and the free CPU tier
-gives 2 vCPU and 16 GB of RAM, which is more memory than the entire compose
-stack reserves. It also builds in seconds here, because the Space wraps the
-image CD already publishes rather than rebuilding the app.
+Roughly ten minutes, most of it spent generating secrets.
+
+Hugging Face accounts themselves are free and cardless, and the Space builds in
+seconds because it wraps the image CD already publishes rather than rebuilding
+the app.
 
 **What you give up.** Storage is ephemeral, so the database resets on every
 restart — this is a demo, not somewhere to keep data. It is a single container:
