@@ -150,10 +150,18 @@ secret validation above. `--no-build` matters too: `web` and `worker` still inhe
 `build:` from the base file, and without it a stale local checkout can be built and
 silently substituted for the released image.
 
-> **Make the GHCR package public first, or the pull fails with `denied`.** Packages
-> published by Actions are private by default *even from a public repository*. Go to your
-> profile → Packages → `secure-api` → Package settings → Change visibility → Public.
-> Prefer to keep it private? Then authenticate on the host instead, with a PAT carrying
+The package is public — it inherited the repository's visibility — so the host pulls
+anonymously with no registry login. Confirmed with an unauthenticated
+`docker buildx imagetools inspect`, which reports both `linux/amd64` and `linux/arm64`.
+Check it yourself any time with:
+
+```bash
+docker buildx imagetools inspect ghcr.io/dharuneshboopathy/secure-api:latest
+```
+
+> If that ever returns `denied` — most likely because the repository or the package was
+> made private — either flip the package back (profile → Packages → `secure-api` →
+> Package settings → Change visibility) or authenticate on the host with a PAT carrying
 > only `read:packages`:
 > ```bash
 > echo "$GHCR_TOKEN" | docker login ghcr.io -u dharuneshboopathy --password-stdin
@@ -237,9 +245,14 @@ Push to `main`. CI runs, CD publishes a new multi-arch image, then on the host:
 
 ```bash
 cd ~/apimonitor && git pull          # only needed if compose/Caddy config changed
-docker compose $COMPOSE pull
-docker compose $COMPOSE up -d --no-build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
 ```
+
+(Worth putting `alias dcp='docker compose -f docker-compose.yml -f docker-compose.prod.yml'`
+in `~/.bashrc` on the host — the `$COMPOSE` export from step 5 is gone in a new SSH
+session, and the failure mode of forgetting the flags is a silent switch to the
+development profile.)
 
 Migrations apply automatically on container start.
 
