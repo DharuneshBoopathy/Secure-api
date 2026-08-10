@@ -81,11 +81,12 @@ class Settings(BaseSettings):
             )
         return val
 
-    # No password in the default. It was a local convenience, but a credential
-    # literal in source is one copy-paste away from being a real one, and
-    # production refuses to start without DATABASE_URL set anyway
-    # (validate_security_settings below). Supply the full DSN via .env.
-    database_url: str = "mysql+pymysql://apimonitor@127.0.0.1:3306/apimonitor"
+    # SQLite, so the default carries no credentials at all — neither a literal
+    # password nor a conspicuously absent one. This is the same zero-setup path
+    # the README documents for running without Docker; every real deployment
+    # sets DATABASE_URL explicitly (docker-compose.yml, k8s/configmap.yaml),
+    # and production refuses to start without it (validate_security_settings).
+    database_url: str = "sqlite:///./apimonitor.db"
     monitor_api_key: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     secret_key: str = Field(default_factory=lambda: secrets.token_hex(32))
     jwt_algorithm: str = "HS256"

@@ -155,7 +155,12 @@ jobs:
 
   deploy-production:
     needs: [merge, check-deploy-config]
-    if: needs.check-deploy-config.outputs.configured == 'true'
+    # Same head_repository guard as `build`: this job checks out the triggering
+    # run's SHA and holds cluster credentials, so it must never run for a SHA
+    # that originated outside this repository.
+    if: >-
+      needs.check-deploy-config.outputs.configured == 'true' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     environment:
       name: production

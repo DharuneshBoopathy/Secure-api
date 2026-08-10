@@ -14,6 +14,11 @@ import os
 import random
 import time
 
+# SystemRandom rather than the module-level functions: load shaping does not
+# need unpredictability, but the bare `random` module trips security scanners
+# on every call site, and a CSPRNG costs nothing next to an HTTP round trip.
+_rng = random.SystemRandom()
+
 from locust import HttpUser, between, events, task
 
 API_KEY = os.environ.get("MONITOR_API_KEY", "")
@@ -39,13 +44,13 @@ def _check_key(environment, **_kwargs):
 
 def _event() -> dict:
     return {
-        "method": "GET" if random.random() < 0.7 else "POST",  # nosec B311 — load shaping, not security
-        "path": random.choice(SAMPLE_PATHS),  # nosec B311
-        "status_code": 500 if random.random() < 0.05 else 200,  # nosec B311
-        "latency_ms": random.random() * 200,  # nosec B311
-        "body_bytes": random.randint(0, 2000),  # nosec B311
-        "request_size_bytes": random.randint(0, 1000),  # nosec B311
-        "response_size_bytes": random.randint(0, 4000),  # nosec B311
+        "method": "GET" if _rng.random() < 0.7 else "POST",
+        "path": _rng.choice(SAMPLE_PATHS),
+        "status_code": 500 if _rng.random() < 0.05 else 200,
+        "latency_ms": _rng.random() * 200,
+        "body_bytes": _rng.randint(0, 2000),
+        "request_size_bytes": _rng.randint(0, 1000),
+        "response_size_bytes": _rng.randint(0, 4000),
     }
 
 

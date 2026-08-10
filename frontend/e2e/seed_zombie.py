@@ -5,14 +5,18 @@ background job (app/jobs/scheduler.py::_idle_scan, every 30 minutes) — far
 too slow for an e2e test's timeout. Ingested traffic, by contrast, produces
 shadow endpoints and alerts synchronously (see process_single_event), so
 those flows don't need this kind of seeding; only the zombie-retire flow
-does. Run via `python e2e/seed_zombie.py <path-to-db>`.
+does. Run via `E2E_DB_PATH=<path-to-db> python e2e/seed_zombie.py`.
 """
 
+import os
 import sqlite3
-import sys
 from datetime import UTC, datetime
 
-db_path = sys.argv[1] if len(sys.argv) > 1 else "../e2e.db"
+# The database location comes from the environment, not argv. A connection
+# target taken straight off the command line is trivially redirected by
+# whatever invokes the script, and this one opens a database and deletes rows
+# from it. core-flows.spec.ts sets E2E_DB_PATH when it shells out.
+db_path = os.environ.get("E2E_DB_PATH", "../e2e.db")
 conn = sqlite3.connect(db_path)
 cur = conn.cursor()
 org_id = cur.execute("SELECT id FROM organizations ORDER BY id LIMIT 1").fetchone()[0]

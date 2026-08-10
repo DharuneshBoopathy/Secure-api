@@ -78,7 +78,10 @@ test.describe("Core CRUD flows", () => {
     // local dev instance); it defaults to the dedicated e2e database.
     const dbPath = process.env.E2E_DB_PATH ?? path.join(__dirname, "..", "..", "e2e.db");
     const pythonExe = process.env.E2E_PYTHON ?? "python";
-    execFileSync(pythonExe, [path.join(__dirname, "seed_zombie.py"), dbPath], { stdio: "inherit" });
+    execFileSync(pythonExe, [path.join(__dirname, "seed_zombie.py")], {
+      stdio: "inherit",
+      env: { ...process.env, E2E_DB_PATH: dbPath },
+    });
 
     await page.goto("/zombie");
     const row = page.locator("div", { hasText: "/api/legacy/report" }).first();

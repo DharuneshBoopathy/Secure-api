@@ -42,15 +42,21 @@ const SAMPLE_PATHS = [
   "/api/reports?type=monthly",
 ];
 
-function randomEvent() {
+// Deterministic load shaping, derived from a sequence number rather than
+// Math.random(). The mix is unchanged — 70% GET, 5% server errors, the same
+// spread of sizes — but two runs of the same profile now emit byte-identical
+// batches, so a latency difference between runs is the system under test
+// changing rather than the generator. Unpredictability was never a property
+// this needed, and it is the one thing Math.random() was providing.
+function syntheticEvent(seq) {
   return {
-    method: Math.random() < 0.7 ? "GET" : "POST",
-    path: SAMPLE_PATHS[Math.floor(Math.random() * SAMPLE_PATHS.length)],
-    status_code: Math.random() < 0.05 ? 500 : 200,
-    latency_ms: Math.random() * 200,
-    body_bytes: Math.floor(Math.random() * 2000),
-    request_size_bytes: Math.floor(Math.random() * 1000),
-    response_size_bytes: Math.floor(Math.random() * 4000),
+    method: seq % 10 < 7 ? "GET" : "POST",
+    path: SAMPLE_PATHS[seq % SAMPLE_PATHS.length],
+    status_code: seq % 20 === 0 ? 500 : 200,
+    latency_ms: (seq * 37) % 200,
+    body_bytes: (seq * 53) % 2000,
+    request_size_bytes: (seq * 29) % 1000,
+    response_size_bytes: (seq * 71) % 4000,
   };
 }
 
@@ -59,8 +65,10 @@ export default function () {
     throw new Error("Set -e API_KEY=<apimonitor per-integration key> — see loadtest/README.md");
   }
   const events = [];
+  // __VU / __ITER are k6 globals, so each virtual user and each iteration
+  // walks a different stretch of the sequence instead of resending one batch.
   for (let i = 0; i < BATCH_SIZE; i++) {
-    events.push(randomEvent());
+    events.push(syntheticEvent(__VU * 1000003 + __ITER * BATCH_SIZE + i));
   }
   const res = http.post(`${BASE_URL}/api/ingest/batch`, JSON.stringify({ events }), {
     headers: { "Content-Type": "application/json", "X-Monitor-Key": API_KEY },
