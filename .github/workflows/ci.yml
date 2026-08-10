@@ -17,14 +17,43 @@ jobs:
       # The lockfile is what actually ships (Dockerfile installs from it), so
       # a requirements.txt edit that never made it into the lock would be a
       # change nobody deploys. Recompiling and diffing catches that drift.
+      #
+      # --universal resolves for every platform at once and emits environment
+      # markers, rather than resolving for whichever OS ran the compile. A
+      # platform-specific lock cannot work here: compiled on Windows it omits
+      # uvloop and Linux installs die with "all requirements must be pinned
+      # upfront with ==, but found: uvloop"; compiled on Linux it omits
+      # colorama and breaks Windows dev machines the same way. Both this
+      # command and the one in the error message below must keep the flag.
+      #
+      # uv is pinned because the diff compares generated output byte for byte
+      # — an unpinned `pipx run uv` lets a new uv release with different
+      # formatting fail this gate on a commit that changed no dependencies.
+      #
+      # The check file is seeded from the committed lock first. uv keeps the
+      # pins already present in its output file unless requirements.txt forces
+      # a change, so seeding asks the question we actually care about — "does
+      # the lock still satisfy requirements.txt?" — instead of "has anything
+      # on PyPI been released since the lock was written?". Compiling into an
+      # empty path re-resolves every `>=` floor to whatever is newest that
+      # minute, which turns this gate red on commits that touched nothing.
+      # Verified it still fails when requirements.txt gains a package the
+      # lock lacks.
       - name: Verify requirements.lock is up to date
         run: |
-          pipx run uv pip compile requirements.txt --generate-hashes \
-            --python-version 3.12 -o /tmp/requirements.check
+          cp requirements.lock /tmp/requirements.check
+          pipx run --spec uv==0.12.3 uv pip compile requirements.txt \
+            --generate-hashes --universal --python-version 3.12 \
+            -o /tmp/requirements.check
           diff <(grep -v '^#' requirements.lock) <(grep -v '^#' /tmp/requirements.check) \
-            || { echo "::error::requirements.lock is stale — re-run: uv pip compile requirements.txt --generate-hashes --python-version 3.12 -o requirements.lock"; exit 1; }
+            || { echo "::error::requirements.lock is stale — re-run: uv pip compile requirements.txt --generate-hashes --universal --python-version 3.12 -o requirements.lock"; exit 1; }
       - run: pip install --require-hashes -r requirements.lock
-      - run: pip install ruff mypy
+      # Pinned deliberately. These gate the build, and an unpinned linter makes
+      # CI a function of the latest upstream release rather than of this
+      # commit: ruff 0.16 widened its default rule set and failed a tree that
+      # had not changed. ruff.toml fixes which rules run; this fixes which
+      # implementation of them runs. Bump on purpose, not by surprise.
+      - run: pip install ruff==0.16.2 mypy==2.3.0
       - run: ruff check app
       - run: mypy app --ignore-missing-imports
       - uses: actions/setup-node@v4
@@ -84,7 +113,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install --require-hashes -r requirements.lock
-      - run: pip install bandit safety pip-audit
+      # bandit is pinned for the same reason as ruff/mypy above — it is a
+      # blocking gate, so a new release adding a check would fail an unchanged
+      # tree. safety and pip-audit are informational below and float on
+      # purpose: for those, "the advisory database got newer" is the point.
+      - run: pip install bandit==1.9.4 safety pip-audit
       - run: bandit -r app
       - run: safety check || true
       # pip-audit checks the resolved environment against the PyPI/OSV

@@ -1,4 +1,4 @@
-.PHONY: setup up down dev build-frontend test clean reset-env logs migrate
+.PHONY: setup up down dev build-frontend test clean reset-env logs migrate lock
 
 # -----------------------------------------------------------------------------
 # One-command onboarding:
@@ -33,6 +33,21 @@ migrate:
 # Build the frontend SPA (served by FastAPI when present).
 build-frontend:
 	cd frontend && npm install && npm run build
+
+# Regenerate requirements.lock after editing requirements.txt.
+#
+# --universal is not optional. Without it uv resolves for whichever OS you are
+# on, and the lock silently excludes the other platform's packages: generated
+# on Windows it omits uvloop, and every Linux install then fails with "all
+# requirements must be pinned upfront with ==, but found: uvloop" — CI, the
+# Docker build and production all at once. With it, one lock carries
+# environment markers and installs correctly everywhere.
+#
+# Keep the version in sync with the pin in .github/workflows/ci.yml, which
+# diffs this file's output byte for byte.
+lock:
+	pipx run --spec uv==0.12.3 uv pip compile requirements.txt \
+	  --generate-hashes --universal --python-version 3.12 -o requirements.lock
 
 # Run the backend test suite.
 test:
