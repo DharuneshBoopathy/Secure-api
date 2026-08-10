@@ -8,3 +8,9 @@ frontend/node_modules
 *.md
 nginx/logs
 .pytest_cache
+# Local SQLite scratch DBs and dumps. The Dockerfile copies only app/, alembic/
+# and openapi/ so these never reach the image today, but an added COPY should
+# not be able to bake real data into a published layer.
+*.db
+*.db.bak-*
+backups/
