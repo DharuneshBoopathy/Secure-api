@@ -192,8 +192,14 @@ nc -zv <public-ip> 3000                # must fail  (Grafana)
 
 curl -I https://yourname.duckdns.org/health    # 200, valid chain, HSTS present
 curl -I http://yourname.duckdns.org/           # 308 -> https
-curl -s -o /dev/null -w '%{http_code}\n' https://yourname.duckdns.org/docs      # 404
 curl -s -o /dev/null -w '%{http_code}\n' https://yourname.duckdns.org/metrics   # blocked
+
+# Docs disabled — assert on the body, not the status. Unknown paths return 200
+# with the SPA shell so the app can render its own 404s, so a withheld /docs
+# and a served one both come back 200; only the content tells them apart.
+curl -s https://yourname.duckdns.org/openapi.json | grep -q '"openapi"' \
+  && echo "SPEC IS EXPOSED — check EXPOSE_API_DOCS" \
+  || echo "spec withheld, as expected"
 ```
 
 On the server:

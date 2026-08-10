@@ -596,6 +596,11 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
 [docs/deployment-oracle-free.md](docs/deployment-oracle-free.md) walks through a complete
 free-tier deployment on an Oracle Cloud Always Free VM.
 
+For a public demo with no cloud account and no payment card,
+[docs/deployment-huggingface.md](docs/deployment-huggingface.md) runs the released
+image on a free Hugging Face Space — single container on SQLite, no worker or
+observability sidecars, storage reset on every restart.
+
 ### Kubernetes
 
 `k8s/` holds plain manifests plus a `kustomization.yaml`
