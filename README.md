@@ -350,19 +350,6 @@ replicas each enforces its own counters, multiplying the effective limit. Set
 Designed to run behind a TLS-terminating proxy (ALB, Cloudflare, Traefik,
 Caddy, or nginx with Let's Encrypt). The bundled nginx listens on :80 only.
 
-`docker-compose.prod.yml` supplies that proxy for single-host deployments: it adds
-Caddy on :80/:443 with automatic Let's Encrypt certificates in front of the existing
-nginx, rebinds every other published port to loopback, and runs uvicorn with
-`--proxy-headers` so rate limiting sees real client IPs.
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
-```
-
-See **[docs/deployment-oracle-free.md](docs/deployment-oracle-free.md)** for a complete
-free-tier runbook (host provisioning, firewall, secrets, verification, backups).
-
 ---
 
 ## API reference
@@ -581,28 +568,6 @@ Setting `REDIS_URL` switches on three things at once
 
 Ingest becomes eventually-consistent when queued: an accepted event may not
 be queryable for a moment.
-
-### Single host
-
-`docker-compose.prod.yml` is the production overlay for one machine: Caddy terminating
-TLS on :80/:443 with automatic Let's Encrypt certificates, every other port rebound to
-loopback, and `APP_ENV=production` with docs and demo routes off.
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
-```
-
-[docs/deployment-oracle-free.md](docs/deployment-oracle-free.md) walks through a complete
-free-tier deployment on an Oracle Cloud Always Free VM.
-
-For a public demo with no cloud account and no payment card,
-[docs/deployment-render.md](docs/deployment-render.md) runs the released image on
-Render's free plan — single container on SQLite, no worker or observability
-sidecars, sleeps when idle and resets storage on every deploy. Measured at
-184 MiB against the free plan's 512 MB cap.
-[docs/deployment-huggingface.md](docs/deployment-huggingface.md) covers the same
-shape on a Hugging Face Space, which needs a PRO account.
 
 ### Kubernetes
 

@@ -1,42 +1,38 @@
 name: CD
 
-# Runs only after CI (ci.yml) finishes successfully on main — never publishes
-# a commit that hasn't passed lint/type-check/tests/security-scan.
+# MANUAL ONLY — this workflow does not run on its own.
 #
-# Publishes a multi-architecture image to GHCR:
-#   ghcr.io/<owner>/<repo>:latest  and  :<commit-sha>
+# There is no active deployment for this project, so nothing should be
+# publishing release images on a schedule nobody is consuming. It previously
+# ran automatically after every green CI run on main and pushed to GHCR; that
+# trigger is removed rather than the workflow, because the pipeline itself is
+# correct and re-enabling it is a two-line change (restore the `workflow_run`
+# block below). Run it by hand from the Actions tab if you ever want an image.
 #
-# linux/arm64 is not optional here — the documented deployment target is an
-# Oracle Cloud Ampere A1 host (see docs/deployment-oracle-free.md), and an
-# amd64-only image simply will not run on it. Each architecture is built on a
-# runner of that architecture rather than under QEMU: emulated Node segfaults
-# on the frontend build often enough to matter, and native is minutes instead
-# of tens of minutes. GitHub's arm64 runners are free for public repositories.
+# Publishes a multi-architecture image (linux/amd64 + linux/arm64) to GHCR as
+# ghcr.io/<owner>/<repo>:latest and :<commit-sha>. Each architecture builds on
+# a runner of that architecture rather than under QEMU, where the Node
+# frontend build segfaults often enough to matter.
 #
 # deploy-production targets Kubernetes and is skipped unless
-# KUBE_CONFIG_PRODUCTION exists, so this workflow is green on a single-host
-# deployment while staying ready if a cluster is ever added. To enable it:
+# KUBE_CONFIG_PRODUCTION exists. To enable it:
 #   1. A `production` GitHub Environment (Settings > Environments) with
 #      required reviewers — THAT is the manual-approval gate; `environment:`
 #      below only targets it, the rule itself is a repo setting.
 #   2. A `KUBE_CONFIG_PRODUCTION` secret: base64-encoded kubeconfig.
+#
+# To restore automatic publishing, replace the `on:` block with:
+#   on:
+#     workflow_run:
+#       workflows: ["CI"]
+#       types: [completed]
+#       branches: [main]
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
-    # The head_repository check is belt and braces on top of `branches: [main]`
-    # above: workflow_run carries the triggering run's head SHA, and this job
-    # checks that SHA out and builds it with packages:write. Requiring the run
-    # to have come from this repository means a fork can never reach the push
-    # credentials, independently of how the trigger filter behaves.
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -51,8 +47,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       # GITHUB_REPOSITORY is "DharuneshBoopathy/Secure-api", but an OCI
       # reference must be lowercase — docker rejects the mixed-case form
@@ -121,14 +115,14 @@ jobs:
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "IMAGE=$image" >> "$GITHUB_ENV"
-          echo "image=$image:${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+          echo "image=$image:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Create and push manifest list
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create \
             --tag "$IMAGE:latest" \
-            --tag "$IMAGE:${{ github.event.workflow_run.head_sha }}" \
+            --tag "$IMAGE:${{ github.sha }}" \
             $(printf "$IMAGE@sha256:%s " *)
 
       - name: Show published architectures
@@ -150,25 +144,18 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::KUBE_CONFIG_PRODUCTION is not set — skipping the Kubernetes rollout. The image was published to GHCR; a single-host deployment pulls it directly (docs/deployment-oracle-free.md)."
+            echo "::notice::KUBE_CONFIG_PRODUCTION is not set — skipping the Kubernetes rollout. The image was published to GHCR and can be pulled from there."
           fi
 
   deploy-production:
     needs: [merge, check-deploy-config]
-    # Same head_repository guard as `build`: this job checks out the triggering
-    # run's SHA and holds cluster credentials, so it must never run for a SHA
-    # that originated outside this repository.
-    if: >-
-      needs.check-deploy-config.outputs.configured == 'true' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+    if: needs.check-deploy-config.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment:
       name: production
       url: https://apimonitor.example.com
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
       - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
       # Passed through env rather than interpolated into the script body. A
       # ${{ secrets.* }} expansion is substituted into the command text before
