@@ -356,7 +356,8 @@ nginx, rebinds every other published port to loopback, and runs uvicorn with
 `--proxy-headers` so rate limiting sees real client IPs.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
 ```
 
 See **[docs/deployment-oracle-free.md](docs/deployment-oracle-free.md)** for a complete
@@ -588,7 +589,8 @@ TLS on :80/:443 with automatic Let's Encrypt certificates, every other port rebo
 loopback, and `APP_ENV=production` with docs and demo routes off.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
 ```
 
 [docs/deployment-oracle-free.md](docs/deployment-oracle-free.md) walks through a complete

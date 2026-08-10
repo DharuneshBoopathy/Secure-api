@@ -17,10 +17,22 @@
 #      proxies to the existing nginx, which keeps its rate limiting and its
 #      credential-redacting JSON access log.
 #   3. uvicorn is told to trust proxy headers so per-client rate limiting works.
+#   4. web and worker run the multi-arch image CD publishes to GHCR rather than
+#      building on the host. Building in place costs about ten minutes on an
+#      Ampere A1 and the frontend stage is the memory spike most likely to get
+#      the container OOM-killed on first boot; pulling takes about a minute and
+#      ships the exact artifact CI tested. Both services still inherit `build:`
+#      from the base file, so pass --no-build (see below) to be certain a stale
+#      local tree can never be substituted for the released image.
 #
 # Required in .env beyond the base stack:
 #   PUBLIC_HOSTNAME=yourname.duckdns.org
 #   ACME_EMAIL=you@example.com
+#
+# Optional: APIMONITOR_IMAGE pins a specific release instead of :latest, e.g.
+#   APIMONITOR_IMAGE=ghcr.io/dharuneshboopathy/secure-api:<commit-sha>
+# Pinning is what makes a rollback possible — set it to the previous sha and
+# re-run the pull/up pair.
 
 services:
   caddy:
@@ -55,6 +67,8 @@ services:
     ports: !override []
 
   web:
+    image: ${APIMONITOR_IMAGE:-ghcr.io/dharuneshboopathy/secure-api:latest}
+    pull_policy: always
     # Behind two proxies, uvicorn sees the proxy's IP as the client unless it is told
     # to honour X-Forwarded-For, which would make slowapi rate-limit the entire
     # internet as a single client. Safe to trust unconditionally here precisely
@@ -79,6 +93,8 @@ services:
       - "127.0.0.1:8000:8000"
 
   worker:
+    image: ${APIMONITOR_IMAGE:-ghcr.io/dharuneshboopathy/secure-api:latest}
+    pull_policy: always
     environment:
       APP_ENV: production
 

@@ -134,20 +134,37 @@ doing its job — read the error.
 ## 5. Deploy
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+export COMPOSE="-f docker-compose.yml -f docker-compose.prod.yml"
+docker compose $COMPOSE pull
+docker compose $COMPOSE up -d --no-build
 ```
+
+The host pulls the multi-arch image CD published to GHCR rather than building. That is
+about a minute instead of about ten, and it runs the exact artifact CI tested — building
+on the box would also make the frontend stage the most likely thing to get OOM-killed on
+first boot.
 
 Always pass both `-f` flags. Plain `docker compose up` silently picks up
 `docker-compose.override.yml`, which sets `APP_ENV=development` and disables the strict
-secret validation above.
+secret validation above. `--no-build` matters too: `web` and `worker` still inherit
+`build:` from the base file, and without it a stale local checkout can be built and
+silently substituted for the released image.
+
+> **Make the GHCR package public first, or the pull fails with `denied`.** Packages
+> published by Actions are private by default *even from a public repository*. Go to your
+> profile → Packages → `secure-api` → Package settings → Change visibility → Public.
+> Prefer to keep it private? Then authenticate on the host instead, with a PAT carrying
+> only `read:packages`:
+> ```bash
+> echo "$GHCR_TOKEN" | docker login ghcr.io -u dharuneshboopathy --password-stdin
+> ```
 
 > Requires **Compose v2.24+** for the `!override` tag the overlay uses to rebind ports.
 > On an older version the port lists are *concatenated* instead of replaced and every
 > service stays exposed on `0.0.0.0` — which is exactly the thing this overlay exists to
 > prevent. Check `docker compose version` before the first deploy.
 
-The first build takes roughly 10 minutes (the frontend and Python wheels are compiled for
-ARM). Certificate issuance happens on Caddy's first start and takes a few seconds.
+Certificate issuance happens on Caddy's first start and takes a few seconds.
 
 ## 6. Verify
 
@@ -216,12 +233,22 @@ is not a backup. Restoring is untested until you test it; do that once.
 
 ## Redeploying
 
+Push to `main`. CI runs, CD publishes a new multi-arch image, then on the host:
+
 ```bash
-cd ~/apimonitor && git pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+cd ~/apimonitor && git pull          # only needed if compose/Caddy config changed
+docker compose $COMPOSE pull
+docker compose $COMPOSE up -d --no-build
 ```
 
 Migrations apply automatically on container start.
+
+To roll back, pin the previous image instead of pulling a new one — set
+`APIMONITOR_IMAGE=ghcr.io/dharuneshboopathy/secure-api:<previous-sha>` in `.env` and re-run
+the pair above. Every CD run tags by commit sha precisely so this is possible; `:latest`
+alone gives you no way back. Note that rollback covers the application only — Alembic
+migrations are not reversed, so a release containing a destructive migration needs the
+database restored from the backup below.
 
 ## Known caveats
 

@@ -1,20 +1,25 @@
 name: CD
 
-# Runs only after CI (ci.yml) finishes successfully on main — never deploys
+# Runs only after CI (ci.yml) finishes successfully on main — never publishes
 # a commit that hasn't passed lint/type-check/tests/security-scan.
 #
-# Requires repo setup this workflow can't do for you (see README's
-# "Kubernetes deployment" section):
+# Publishes a multi-architecture image to GHCR:
+#   ghcr.io/<owner>/<repo>:latest  and  :<commit-sha>
+#
+# linux/arm64 is not optional here — the documented deployment target is an
+# Oracle Cloud Ampere A1 host (see docs/deployment-oracle-free.md), and an
+# amd64-only image simply will not run on it. Each architecture is built on a
+# runner of that architecture rather than under QEMU: emulated Node segfaults
+# on the frontend build often enough to matter, and native is minutes instead
+# of tens of minutes. GitHub's arm64 runners are free for public repositories.
+#
+# deploy-production targets Kubernetes and is skipped unless
+# KUBE_CONFIG_PRODUCTION exists, so this workflow is green on a single-host
+# deployment while staying ready if a cluster is ever added. To enable it:
 #   1. A `production` GitHub Environment (Settings > Environments) with
-#      required reviewers configured — THAT is the actual manual-approval
-#      gate; `environment:` below only targets it, the approval rule itself
-#      is a repo setting, not expressible in workflow YAML.
-#   2. A `KUBE_CONFIG_PRODUCTION` repo/environment secret: a base64-encoded
-#      kubeconfig with access to the target cluster.
-#   3. GHCR write access, which the default GITHUB_TOKEN already has as
-#      long as the repo's Actions settings permit package publishing.
-# Until those exist, deploy-production will fail at the "configure
-# kubeconfig" step — build-and-push still works on its own.
+#      required reviewers — THAT is the manual-approval gate; `environment:`
+#      below only targets it, the rule itself is a repo setting.
+#   2. A `KUBE_CONFIG_PRODUCTION` secret: base64-encoded kubeconfig.
 
 on:
   workflow_run:
@@ -23,36 +28,127 @@ on:
     branches: [main]
 
 jobs:
-  build-and-push:
+  build:
     if: github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+
+      # GITHUB_REPOSITORY is "DharuneshBoopathy/Secure-api", but an OCI
+      # reference must be lowercase — docker rejects the mixed-case form
+      # outright with "repository name must be lowercase", which is why this
+      # workflow never published anything. ${VAR,,} lowercases it.
+      - name: Resolve image name and platform tag
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "PLATFORM_TAG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        run: echo "image=ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+
+      # Pushed by digest only, with no tag. The merge job below stitches the
+      # per-architecture digests into one tagged manifest list, so a tag never
+      # points at a half-published set of architectures.
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:${{ github.event.workflow_run.head_sha }}
-            ghcr.io/${{ github.repository }}:latest
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ env.PLATFORM_TAG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: ref
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          echo "image=$image:${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:latest" \
+            --tag "$IMAGE:${{ github.event.workflow_run.head_sha }}" \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: Show published architectures
+        run: docker buildx imagetools inspect "$IMAGE:latest"
+
+  # Secrets cannot be referenced in a job-level `if:`, so the check is its own
+  # job whose output can be.
+  check-deploy-config:
+    needs: merge
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
+        env:
+          KUBE_CONFIG_PRODUCTION: ${{ secrets.KUBE_CONFIG_PRODUCTION }}
+        run: |
+          if [ -n "$KUBE_CONFIG_PRODUCTION" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::KUBE_CONFIG_PRODUCTION is not set — skipping the Kubernetes rollout. The image was published to GHCR; a single-host deployment pulls it directly (docs/deployment-oracle-free.md)."
+          fi
 
   deploy-production:
-    needs: build-and-push
+    needs: [merge, check-deploy-config]
+    if: needs.check-deploy-config.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -77,8 +173,8 @@ jobs:
         env:
           KUBECONFIG: kubeconfig.yaml
         run: |
-          kubectl set image deployment/apimonitor-web web=${{ needs.build-and-push.outputs.image }}
-          kubectl set image deployment/apimonitor-worker worker=${{ needs.build-and-push.outputs.image }}
+          kubectl set image deployment/apimonitor-web web=${{ needs.merge.outputs.image }}
+          kubectl set image deployment/apimonitor-worker worker=${{ needs.merge.outputs.image }}
           kubectl rollout status deployment/apimonitor-web --timeout=180s
           kubectl rollout status deployment/apimonitor-worker --timeout=180s
       - name: Clean up kubeconfig
