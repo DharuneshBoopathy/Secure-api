@@ -569,6 +569,16 @@ Setting `REDIS_URL` switches on three things at once
 Ingest becomes eventually-consistent when queued: an accepted event may not
 be queryable for a moment.
 
+### Public deployment, free
+
+For a public instance with no cloud account and no payment card,
+[docs/deployment-render.md](docs/deployment-render.md) runs the released image
+on Render's free plan, against a free managed MySQL (TiDB Cloud or Aiven) so the
+data survives redeploys. Single container: no worker or observability sidecars,
+and it sleeps after 15 minutes idle. Measured at 184 MiB against the free plan's
+512 MB cap — read the guide's memory section before leaning on that number with
+a database that grows.
+
 ### Kubernetes
 
 `k8s/` holds plain manifests plus a `kustomization.yaml`
