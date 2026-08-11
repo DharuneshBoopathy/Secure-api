@@ -4,6 +4,11 @@ A public, working instance in about fifteen minutes, with no card and no cloud
 account — and unlike the earlier draft of this guide, with a database that
 survives redeploys.
 
+**Live instance:** <https://api-security-monitor.onrender.com> — free plan,
+Singapore, image-backed. It sleeps after 15 minutes idle, so the first request
+after a quiet spell takes 30–60 seconds. Everything below is the procedure that
+produced it, including the two mistakes it took to get there.
+
 **Why here.** Oracle, Google Cloud, AWS and Azure all require a payment card for
 identity verification even on tiers that never charge. Hugging Face Spaces looks
 like an answer but is not: Gradio and Docker Spaces "require a paid plan to
@@ -113,7 +118,7 @@ Watch the deploy log: Alembic reports four migrations already at head, then
 uvicorn binds. Render marks the service live once `/health` answers.
 
 ```bash
-APP=https://api-security-monitor.onrender.com   # your actual URL
+APP=https://api-security-monitor.onrender.com   # replace if you renamed the service
 
 curl -s $APP/health                                 # {"status":"ok","db":"ok"}
 curl -sI $APP | grep -i strict-transport-security   # HSTS present
