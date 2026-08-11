@@ -34,22 +34,42 @@ services:
       # touched only deployment files and docs.
       url: ghcr.io/dharuneshboopathy/secure-api:62a8a51e96a0d3a0c30a3631d73ff12782e98796
 
-    # Render assigns a port through $PORT and routes to it; the image's own
-    # CMD hardcodes 8000, so the command is restated here to honour it. The
-    # fallback keeps the same line working under plain `docker run`.
-    # --proxy-headers because Render terminates TLS in front of the service —
-    # without it slowapi sees the proxy as the only client and rate-limits
-    # every visitor together.
-    dockerCommand: >-
-      sh -c "alembic upgrade head &&
-      uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
-      --proxy-headers --forwarded-allow-ips='*'"
+    # Deliberately no dockerCommand. The image's own CMD already chains
+    # `alembic upgrade head && uvicorn ...`, and it works because Docker runs
+    # a real shell for it. Render does not: it splits dockerCommand into argv
+    # and execs it directly, with no shell anywhere. Both obvious spellings
+    # were tried against the live service and both failed —
+    #
+    #   dockerCommand: sh -c "alembic upgrade head && uvicorn ..."
+    #     -> sh: 1: alembic upgrade head && uvicorn ...: not found  (exit 127)
+    #        the quoting does not survive Render's parser, so the whole
+    #        string arrives as a single command name
+    #
+    #   dockerCommand: alembic upgrade head && uvicorn ...
+    #     -> alembic: error: unrecognized arguments: && uvicorn ...  (exit 2)
+    #        no shell, so && is just another argv entry
+    #
+    # So the override is dropped and the two things it existed for are set as
+    # environment variables below instead.
 
     healthCheckPath: /health
 
     envVars:
       - key: APP_ENV
         value: production
+      # Render normally assigns a port and expects the service to bind $PORT;
+      # the image's CMD hardcodes 8000 and there is no dockerCommand left to
+      # restate it. Setting PORT to 8000 moves Render to the image instead of
+      # the other way round.
+      - key: PORT
+        value: "8000"
+      # uvicorn's env-var spelling of --forwarded-allow-ips. Render terminates
+      # TLS in front of the service, and uvicorn only trusts proxy headers
+      # from 127.0.0.1 by default — without this slowapi sees the proxy as the
+      # only client and rate-limits every visitor together. --proxy-headers
+      # itself needs no flag: it is on by default in uvicorn.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
       # sync: false means Render prompts for this instead of reading it from
       # here — this file is public and the URL carries the password. Paste the
       # MySQL connection string from TiDB Cloud or Aiven, TLS parameters

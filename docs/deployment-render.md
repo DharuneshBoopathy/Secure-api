@@ -139,6 +139,25 @@ too-short secret. A hang followed by an `OperationalError` instead means
 `wait_for_database` exhausted its ten retries: check the TLS parameters on
 `DATABASE_URL` first.
 
+### Do not add a dockerCommand
+
+`render.yaml` deliberately sets none, and the reason is worth stating because
+the obvious fix for `$PORT` is to add one. **Render splits `dockerCommand` into
+argv and execs it directly — there is no shell**, so the `&&` that chains the
+migration to the server never works. Both spellings were tried against the live
+service:
+
+| `dockerCommand` | Result |
+|---|---|
+| `sh -c "alembic upgrade head && uvicorn ..."` | `sh: 1: alembic upgrade head && uvicorn ...: not found`, exit 127 — the quoting does not survive Render's parser, so the whole string arrives as one command name |
+| `alembic upgrade head && uvicorn ...` | `alembic: error: unrecognized arguments: && uvicorn ...`, exit 2 — no shell, so `&&` is just another argument |
+
+With no override, the image's own `CMD` runs, and *that* chain works because
+Docker gives it a real shell. `PORT=8000` makes Render route to the port the
+image hardcodes, and `FORWARDED_ALLOW_IPS=*` replaces the `--forwarded-allow-ips`
+flag (`--proxy-headers` is already uvicorn's default). Migrations still run on
+every boot, which the ephemeral-SQLite path depends on.
+
 ## 4. Updating
 
 **Image-backed services do not auto-deploy.** Render redeploys on push to `main`
