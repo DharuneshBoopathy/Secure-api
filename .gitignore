@@ -18,6 +18,8 @@ htmlcov/
 .vscode/
 .claude/
 .cursor/
+# Working prompt documents kept alongside the repo but not part of it.
+claude_code_master_prompt.md
 
 # Runtime artifacts
 *.pcap
