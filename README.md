@@ -275,14 +275,23 @@ two concurrent refreshes can't both mint valid chains.
 |---|---|
 | `viewer` | Read own profile |
 | `editor` | Above, plus issue API keys |
-| `admin` | Above, plus manage users, read the platform audit log, right-to-delete, cross-org support access (audit-logged) |
+| `admin` | Above, plus manage viewer/editor accounts, read the platform audit log, right-to-delete, cross-org support access (audit-logged) |
+| `super_admin` | Above, plus manage administrators, grant the admin role, and list every organization (`GET /api/orgs?scope=all`) |
+
+Exactly one account holds `super_admin`: the `ADMIN_USERNAME` one. The role is
+never assignable through the API — `ensure_default_admin()` sets it at startup
+and re-asserts it on every boot, along with `is_active` and any login lockout.
+That repair is the deployment's recovery path: administrators cannot demote,
+deactivate, or delete each other (only the super admin can act on an admin, and
+nothing can act on the super admin), so a peer admin can no longer lock the
+owner out of their own instance.
 
 **Organization roles** gate everything tenant-scoped (traffic, alerts,
 inventory, registry, anomalies):
 
 | Role | Can |
 |---|---|
-| `viewer` | Read the org's data |
+| `viewer` | Read the org's data, and see who else is in it |
 | `editor` | Above, plus ingest, acknowledge, register endpoints |
 | `owner` | Above, plus approve/reject members, change roles, rename, transfer ownership |
 

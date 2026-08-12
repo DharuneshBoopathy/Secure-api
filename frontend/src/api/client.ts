@@ -233,6 +233,15 @@ export type LoginResponse = {
   user: UserInfo;
 };
 
+/** The caller's own profile, straight from the server.
+ *
+ * The store caches `user` from the login response and never refreshes it, so
+ * a role change or a deactivation stays invisible to the tab until re-login.
+ * App.tsx calls this on mount to re-sync. */
+export function getMe(): Promise<UserInfo> {
+  return apiFetch<UserInfo>("/auth/me");
+}
+
 export type ShadowRow = {
   id: number;
   method: string;
@@ -297,6 +306,10 @@ export type OrgRow = {
   owner_user_id: number;
   created_at: string;
   my_role: "owner" | "editor" | "viewer" | null;
+  /** Only present on the super admin's ?scope=all listing — see listAllOrgs. */
+  owner_username?: string | null;
+  member_count?: number | null;
+  pending_count?: number | null;
 };
 
 export type OrgMembershipRow = {
@@ -312,6 +325,12 @@ export type OrgMembershipRow = {
 
 export function listMyOrgs(): Promise<OrgRow[]> {
   return apiFetch<OrgRow[]>("/orgs");
+}
+
+/** Every organization on the platform, with member/pending counts. Super
+ * admin only — 403 for everyone else. */
+export function listAllOrgs(): Promise<OrgRow[]> {
+  return apiFetch<OrgRow[]>("/orgs?scope=all");
 }
 
 export function createOrg(name: string): Promise<OrgRow> {
@@ -430,11 +449,32 @@ export function deleteConnection(id: number): Promise<{ deleted: boolean; endpoi
 
 /* —— Platform user administration (admin only, /api/auth/users) —— */
 
+/** Mirrors app/security.py::Role. `super_admin` is read-only here: the server
+ * assigns it to the ADMIN_USERNAME account at startup and rejects it in every
+ * request schema, so it never appears in a role we send. */
+export type PlatformRole = "super_admin" | "admin" | "editor" | "viewer";
+
+/** Roles that can be assigned through the API — the `super_admin` exclusion is
+ * what stops the account-management UI from offering an unassignable option. */
+export type AssignableRole = "admin" | "editor" | "viewer";
+
+/** True for admin and super_admin — use this to gate admin-only UI rather than
+ * comparing against "admin", which locks the super admin out of their own
+ * pages. Mirrors app/security.py::is_platform_admin. */
+export function isPlatformAdmin(role: string | undefined | null): boolean {
+  return role === "admin" || role === "super_admin";
+}
+
+/** Mirrors app/security.py::is_super_admin. */
+export function isSuperAdmin(role: string | undefined | null): boolean {
+  return role === "super_admin";
+}
+
 export type UserRow = {
   id: number;
   username: string;
   email: string | null;
-  role: "admin" | "editor" | "viewer";
+  role: PlatformRole;
   is_active: boolean;
   created_at: string;
   mfa_enabled: boolean;
@@ -444,13 +484,13 @@ export type AdminCreateUserIn = {
   username: string;
   password: string;
   email: string;
-  role?: "admin" | "editor" | "viewer";
+  role?: AssignableRole;
   is_active?: boolean;
 };
 
 export type UserUpdateIn = {
   email?: string;
-  role?: "admin" | "editor" | "viewer";
+  role?: AssignableRole;
   is_active?: boolean;
 };
 

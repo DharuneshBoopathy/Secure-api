@@ -23,9 +23,23 @@ def utc_now() -> datetime:
 
 
 # ---------------------------------------------------------------------------
-# Role enum – three-tier RBAC
+# Role enum – four-tier RBAC
+#
+# SUPER_ADMIN sits above ADMIN and exists to break the tie between peers:
+# with a flat top tier, any admin could demote or deactivate any other admin,
+# so whoever moved first won and the loser was locked out of their own
+# deployment. Exactly one account holds it — the ``ADMIN_USERNAME`` one — and
+# it is assigned only by ensure_default_admin() at startup, never through the
+# API (see the ^(admin|editor|viewer)$ patterns in app/schemas.py, which
+# deliberately have no super_admin branch).
+#
+# Because require_role() compares by level(), every existing
+# require_role(Role.ADMIN) route accepts a super admin unchanged. Direct
+# string comparisons do NOT get that for free — use is_platform_admin() below
+# rather than ``role == Role.ADMIN.value``.
 # ---------------------------------------------------------------------------
 class Role(str, Enum):
+    SUPER_ADMIN = "super_admin"
     ADMIN = "admin"
     EDITOR = "editor"
     VIEWER = "viewer"
@@ -36,7 +50,7 @@ class Role(str, Enum):
 
     def level(self) -> int:
         """Higher level = more privilege."""
-        return {Role.VIEWER: 0, Role.EDITOR: 1, Role.ADMIN: 2}[self]
+        return {Role.VIEWER: 0, Role.EDITOR: 1, Role.ADMIN: 2, Role.SUPER_ADMIN: 3}[self]
 
     def __ge__(self, other: "Role") -> bool:  # type: ignore[override]
         return self.level() >= other.level()
@@ -49,6 +63,22 @@ class Role(str, Enum):
 
     def __lt__(self, other: "Role") -> bool:  # type: ignore[override]
         return self.level() < other.level()
+
+
+def is_platform_admin(role: str) -> bool:
+    """True for admin and super_admin.
+
+    The check to reach for wherever a platform-admin *capability* is being
+    gated by a bare string comparison — cross-org access, the org-owner
+    bypass, MFA enforcement at login. ``role == Role.ADMIN.value`` silently
+    excludes the super admin from powers a plain admin has.
+    """
+    return role in (Role.ADMIN.value, Role.SUPER_ADMIN.value)
+
+
+def is_super_admin(role: str) -> bool:
+    """True only for the single ADMIN_USERNAME account (see Role.SUPER_ADMIN)."""
+    return role == Role.SUPER_ADMIN.value
 
 
 # ---------------------------------------------------------------------------

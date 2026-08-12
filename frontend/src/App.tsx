@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { getMe, isAuthenticated } from "@/api/client";
 import { Layout } from "@/components/Layout";
 import { Alerts } from "@/pages/Alerts";
 import { Anomalies } from "@/pages/Anomalies";
@@ -25,7 +27,25 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Re-read the caller's own profile once per app load.
+ *
+ * The store caches `user` from the login response and never updates it, so a
+ * role change or a deactivation was invisible to an open tab until the user
+ * happened to log out and back in — which is exactly when it matters most.
+ * Failures are ignored on purpose: apiFetch already redirects on a dead
+ * session, and a transient error here must not blank out a working session. */
+function useSyncCurrentUser() {
+  const setUser = useAppStore((s) => s.setUser);
+  useEffect(() => {
+    if (!isAuthenticated()) return;
+    getMe()
+      .then(setUser)
+      .catch(() => undefined);
+  }, [setUser]);
+}
+
 export default function App() {
+  useSyncCurrentUser();
   return (
     <BrowserRouter>
       <Routes>

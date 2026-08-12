@@ -44,6 +44,8 @@ from app.security import (
     generate_totp_secret,
     hash_password,
     hash_token,
+    is_platform_admin,
+    is_super_admin,
     utc_now,
     validate_password_strength,
     verify_password,
@@ -129,7 +131,7 @@ def login(request: Request, body: LoginIn, db: Session = Depends(get_db)) -> Aut
     # holds valid credentials, matching standard second-factor UX.
     failure_detail = "Invalid credentials"
     failure_reason = None
-    if ok and user is not None and user.role == Role.ADMIN.value and user.mfa_enabled:
+    if ok and user is not None and is_platform_admin(user.role) and user.mfa_enabled:
         if not body.mfa_code:
             ok = False
             failure_detail = "MFA code required"
@@ -558,7 +560,63 @@ def mfa_disable(
 
 # ---------------------------------------------------------------------------
 # Admin: user management (CRUD)
+#
+# The admin tier is deliberately *not* self-governing. Peer admins used to be
+# able to demote and deactivate each other, which meant granting someone admin
+# handed them the power to lock you out of your own deployment — whoever acted
+# first won. Everything that changes an administrator now routes through
+# _require_can_administer() below, and only the super admin passes it.
 # ---------------------------------------------------------------------------
+
+def _require_can_administer(actor: User, target: User) -> None:
+    """Gate any change to another account's role or active status.
+
+    Two rules, in order:
+
+    1. The super admin is untouchable — by a peer, by an admin, and by
+       themselves. Self-inflicted lockout is the same outage as a hostile one,
+       and there is nobody above this account to undo it. Password changes are
+       unaffected; they go through PUT /auth/me/password.
+    2. Administrators may only be modified by the super admin. Ordinary admins
+       keep full control over editor and viewer accounts.
+
+    Rule 2 is about *other* administrators, hence the self exemption: an admin
+    editing their own email or stepping down voluntarily is not the attack
+    this guards against, and without the exemption it would also mask the
+    more specific "cannot deactivate your own account" error below.
+    """
+    if is_super_admin(target.role):
+        raise HTTPException(
+            status_code=403,
+            detail="The super admin account cannot be modified",
+        )
+    if is_platform_admin(target.role) and target.id != actor.id and not is_super_admin(actor.role):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the super admin can modify another administrator",
+        )
+
+
+def _require_can_grant_role(actor: User, role: str) -> None:
+    """Only the super admin mints new administrators.
+
+    Without this, rule 2 above is trivially circumvented: an admin promotes an
+    accomplice, or a demoted admin is re-promoted by a peer.
+    """
+    if is_super_admin(role):
+        # Unreachable through the API (the schema patterns reject the value),
+        # kept so a future caller that bypasses the schema still can't.
+        raise HTTPException(status_code=403, detail="The super admin role cannot be assigned")
+    if role == Role.ADMIN.value and not is_super_admin(actor.role):
+        raise HTTPException(status_code=403, detail="Only the super admin can grant the admin role")
+
+
+def _revoke_refresh_tokens(db: Session, user_id: int) -> None:
+    """Kill every outstanding session for a user. Caller commits."""
+    db.query(RefreshToken).filter(
+        RefreshToken.user_id == user_id, RefreshToken.revoked.is_(False)
+    ).update({"revoked": True})
+
 
 @router.get("/users", dependencies=[Depends(require_role(Role.ADMIN))])
 def list_users(db: Session = Depends(get_db)) -> list[UserOut]:
@@ -576,6 +634,7 @@ def admin_create_user(
     db: Session = Depends(get_db),
 ) -> UserOut:
     """Create a new user with a specified role (admin only)."""
+    _require_can_grant_role(current_user, body.role)
     try:
         validate_password_strength(body.password)
     except PasswordValidationError as exc:
@@ -629,6 +688,11 @@ def update_user(
     user = db.query(User).filter(User.id == user_id).one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    _require_can_administer(admin, user)
+    # The DELETE route has always refused self-deactivation; PATCH accepting
+    # is_active=false without the same check made that guard decorative.
+    if body.is_active is False and user.id == admin.id:
+        raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
     if body.email is not None:
         existing = db.query(User).filter(User.email == body.email, User.id != user_id).one_or_none()
         if existing:
@@ -637,8 +701,13 @@ def update_user(
     if body.role is not None:
         if not Role.has_value(body.role):
             raise HTTPException(status_code=422, detail=f"Invalid role: {body.role}")
+        _require_can_grant_role(admin, body.role)
         user.role = body.role
     if body.is_active is not None:
+        # Deactivating here has to revoke refresh tokens exactly as DELETE
+        # does, or the account keeps a live session it can rotate forever.
+        if user.is_active and not body.is_active:
+            _revoke_refresh_tokens(db, user.id)
         user.is_active = body.is_active
     db.commit()
     db.refresh(user)
@@ -650,7 +719,7 @@ def update_user(
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         success=True,
-        details={"changes": body.model_dump(exclude_none=True)},
+        details={"changes": body.model_dump(exclude_none=True), "actor_role": admin.role},
     )
     return _build_user_out(user)
 
@@ -668,11 +737,9 @@ def delete_user(
         raise HTTPException(status_code=404, detail="User not found")
     if user.id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
+    _require_can_administer(admin, user)
     user.is_active = False
-    # Revoke all active refresh tokens
-    db.query(RefreshToken).filter(
-        RefreshToken.user_id == user_id, RefreshToken.revoked.is_(False)
-    ).update({"revoked": True})
+    _revoke_refresh_tokens(db, user_id)
     db.commit()
     log_audit_event(
         db,
@@ -682,6 +749,7 @@ def delete_user(
         ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
         success=True,
+        details={"actor_role": admin.role},
     )
 
 
@@ -775,6 +843,17 @@ def revoke_api_key(
 # ---------------------------------------------------------------------------
 
 def ensure_default_admin(db: Session) -> None:
+    """Create — and on every subsequent boot, repair — the super-admin account.
+
+    The repair half is the deployment's only lockout recovery path. Previously
+    this function merely rotated a weak password, so an admin who demoted or
+    deactivated the ADMIN_USERNAME account left it broken permanently: a
+    deactivated user can't authenticate (deps._try_jwt filters on is_active),
+    can't be restored by anyone else, and can't even be reached through the
+    MONITOR_API_KEY break-glass path (deps._get_system_admin filters on
+    is_active too). Re-asserting the role and active flag here means a restart
+    always undoes that, whoever did it.
+    """
     settings = get_settings()
     user = db.query(User).filter(User.username == settings.admin_username).one_or_none()
     is_dev = settings.app_env != "production"
@@ -787,7 +866,7 @@ def ensure_default_admin(db: Session) -> None:
             User(
                 username=settings.admin_username,
                 password_hash=hash_password(password),
-                role="admin",
+                role=Role.SUPER_ADMIN.value,
                 is_active=True,
             )
         )
@@ -803,7 +882,30 @@ def ensure_default_admin(db: Session) -> None:
             )
         return
 
-    # Account already exists — rotate if it still holds the known legacy literal "admin".
+    # Account already exists — restore any privilege that was taken away from
+    # it, and clear a lockout from failed logins. Logged at WARNING because
+    # in a healthy deployment this branch never fires: reaching it means
+    # something demoted, disabled, or locked out the super admin.
+    repairs: list[str] = []
+    if user.role != Role.SUPER_ADMIN.value:
+        repairs.append(f"role {user.role!r} -> {Role.SUPER_ADMIN.value!r}")
+        user.role = Role.SUPER_ADMIN.value
+    if not user.is_active:
+        repairs.append("is_active False -> True")
+        user.is_active = True
+    if user.locked_until is not None or user.failed_login_count:
+        repairs.append("cleared login lockout")
+        user.locked_until = None
+        user.failed_login_count = 0
+    if repairs:
+        db.commit()
+        log.warning(
+            "Super-admin account '%s' was repaired at startup: %s.",
+            settings.admin_username,
+            "; ".join(repairs),
+        )
+
+    # Rotate the password if it still holds the known legacy literal "admin".
     if verify_password("admin", user.password_hash):
         password = settings.admin_password
         user.password_hash = hash_password(password)
