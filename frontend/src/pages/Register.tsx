@@ -64,13 +64,18 @@ export function Register() {
           Register for an API Security Monitor account.
         </p>
         <form onSubmit={(e) => void submit(e)} className="mt-6 space-y-4">
+        {/* No placeholders by request. The labels below are the only field
+            names now, so each one needs htmlFor/id to stay the input's
+            accessible name — previously the placeholder was doing that job. */}
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Username</label>
+          <label htmlFor="register-username" className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">
+            Username
+          </label>
           <input
+            id="register-username"
             className="w-full field dark:text-ink-100"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="johndoe"
             minLength={3}
             maxLength={128}
             pattern="^[a-zA-Z0-9_\-\.]+$"
@@ -78,24 +83,28 @@ export function Register() {
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Email</label>
+          <label htmlFor="register-email" className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">
+            Email
+          </label>
           <input
+            id="register-email"
             type="email"
             className="w-full field dark:text-ink-100"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
             required
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Password</label>
+          <label htmlFor="register-password" className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">
+            Password
+          </label>
           <input
+            id="register-password"
             type="password"
             className="w-full field dark:text-ink-100"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            placeholder="Strong password"
             required
           />
           {password.length > 0 && (
@@ -113,13 +122,15 @@ export function Register() {
           )}
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">Confirm password</label>
+          <label htmlFor="register-confirm-password" className="mb-1 block text-xs font-medium text-ink-700 dark:text-ink-300">
+            Confirm password
+          </label>
           <input
+            id="register-confirm-password"
             type="password"
             className="w-full field dark:text-ink-100"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
-            placeholder="Repeat password"
             required
           />
           {confirmPassword.length > 0 && !passwordsMatch && (

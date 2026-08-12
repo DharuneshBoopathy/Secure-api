@@ -321,7 +321,15 @@ class OrgOut(BaseModel):
     slug: str
     owner_user_id: int
     created_at: datetime
+    # None when the caller isn't a member — only reachable via the super
+    # admin's ?scope=all listing, since every other route returns orgs the
+    # caller belongs to.
     my_role: str | None = None
+    # Populated only by ?scope=all; left None elsewhere so the existing
+    # response shape is unchanged for existing callers.
+    owner_username: str | None = None
+    member_count: int | None = None
+    pending_count: int | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

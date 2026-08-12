@@ -16,6 +16,10 @@ Covers:
   12. Ownership transfer demotes the prior owner to editor and updates Organization.owner_user_id.
   13. Renaming an org requires owner role.
   14. A platform admin can manage any org's membership without an OrgMembership row.
+  15. Any active member can list their own org's roster; a non-member cannot.
+  16. Relaxing that read did not relax approve/reject/re-role/remove.
+  17. ?scope=all is super-admin-only and returns every org with its counts,
+      while ?scope=mine keeps the original behaviour.
 """
 
 import pytest
@@ -252,3 +256,90 @@ def test_platform_admin_can_manage_any_org_without_membership(db):
     members = _list_org_members(org_id=org.id, status_filter=None, current_user=admin, db=db)
     assert len(members) == 1
     assert members[0].username == "alice"
+
+
+def test_any_active_member_can_list_their_orgs_roster(db):
+    """Gating the roster at owner meant an org's own editors and viewers got
+    a 403 on the list of people they work alongside."""
+    alice = _make_user(db, "alice")
+    bob = _make_user(db, "bob")
+    carol = _make_user(db, "carol")
+    org = _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Acme"), current_user=alice, db=db)
+    _request_to_join(request=FAKE_REQUEST, org_id=org.id, current_user=bob, db=db)
+    _approve_member(request=FAKE_REQUEST, org_id=org.id, user_id=bob.id, current_user=alice, db=db)
+
+    members = _list_org_members(org_id=org.id, status_filter="active", current_user=bob, db=db)
+    assert {m.username for m in members} == {"alice", "bob"}
+
+    # A non-member is still refused.
+    with pytest.raises(HTTPException) as exc_info:
+        _list_org_members(org_id=org.id, status_filter=None, current_user=carol, db=db)
+    assert exc_info.value.status_code == 403
+
+
+def test_non_owner_member_still_cannot_mutate_membership(db):
+    """The read half was relaxed; approve/reject/re-role/remove were not."""
+    alice = _make_user(db, "alice")
+    bob = _make_user(db, "bob")
+    carol = _make_user(db, "carol")
+    org = _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Acme"), current_user=alice, db=db)
+    _request_to_join(request=FAKE_REQUEST, org_id=org.id, current_user=bob, db=db)
+    _approve_member(request=FAKE_REQUEST, org_id=org.id, user_id=bob.id, current_user=alice, db=db)
+    _request_to_join(request=FAKE_REQUEST, org_id=org.id, current_user=carol, db=db)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _approve_member(request=FAKE_REQUEST, org_id=org.id, user_id=carol.id, current_user=bob, db=db)
+    assert exc_info.value.status_code == 403
+
+    with pytest.raises(HTTPException) as exc_info:
+        _remove_member(request=FAKE_REQUEST, org_id=org.id, user_id=alice.id, current_user=bob, db=db)
+    assert exc_info.value.status_code == 403
+
+
+def test_scope_all_is_super_admin_only(db):
+    alice = _make_user(db, "alice")
+    admin = _make_user(db, "root", role="admin")
+    _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Acme"), current_user=alice, db=db)
+
+    for caller in (alice, admin):
+        with pytest.raises(HTTPException) as exc_info:
+            _list_my_orgs(scope="all", current_user=caller, db=db)
+        assert exc_info.value.status_code == 403
+
+
+def test_scope_all_lists_every_org_with_counts(db):
+    alice = _make_user(db, "alice")
+    bob = _make_user(db, "bob")
+    carol = _make_user(db, "carol")
+    root = _make_user(db, "dharunesh", role="super_admin")
+    org = _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Acme"), current_user=alice, db=db)
+    _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Globex"), current_user=bob, db=db)
+    # One approved member and one still-pending request on Acme.
+    _request_to_join(request=FAKE_REQUEST, org_id=org.id, current_user=bob, db=db)
+    _approve_member(request=FAKE_REQUEST, org_id=org.id, user_id=bob.id, current_user=alice, db=db)
+    _request_to_join(request=FAKE_REQUEST, org_id=org.id, current_user=carol, db=db)
+
+    rows = _list_my_orgs(scope="all", current_user=root, db=db)
+
+    assert {r.name for r in rows} == {"Acme", "Globex"}
+    acme = next(r for r in rows if r.name == "Acme")
+    assert acme.owner_username == "alice"
+    assert acme.member_count == 2
+    assert acme.pending_count == 1
+    # The super admin belongs to neither org, which is exactly the case
+    # my_role has to represent as "not a member".
+    assert acme.my_role is None
+
+
+def test_scope_mine_is_unchanged_for_the_super_admin(db):
+    """?scope=all is additive — the default listing still means "my orgs"."""
+    alice = _make_user(db, "alice")
+    root = _make_user(db, "dharunesh", role="super_admin")
+    _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Acme"), current_user=alice, db=db)
+    own = _create_org(request=FAKE_REQUEST, body=OrgCreateIn(name="Root Org"), current_user=root, db=db)
+
+    rows = _list_my_orgs(scope="mine", current_user=root, db=db)
+
+    assert [r.id for r in rows] == [own.id]
+    assert rows[0].my_role == "owner"
+    assert rows[0].member_count is None

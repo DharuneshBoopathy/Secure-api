@@ -1,7 +1,17 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, ShieldOff, UserCog } from "lucide-react";
+import { Lock, Plus, ShieldOff, UserCog } from "lucide-react";
 import { FormEvent, useState } from "react";
-import { createUser, deactivateUser, isAuthenticated, listUsers, updateUser, type UserRow } from "@/api/client";
+import {
+  createUser,
+  deactivateUser,
+  isAuthenticated,
+  isPlatformAdmin,
+  isSuperAdmin,
+  listUsers,
+  updateUser,
+  type AssignableRole,
+  type UserRow,
+} from "@/api/client";
 import { Badge } from "@/components/Badge";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
@@ -9,6 +19,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { useAppStore } from "@/store/appStore";
 
 const roleVariant: Record<UserRow["role"], "neutral" | "ok" | "warn" | "bad" | "info"> = {
+  super_admin: "warn",
   admin: "info",
   editor: "ok",
   viewer: "neutral",
@@ -18,18 +29,28 @@ export function Users() {
   const currentUser = useAppStore((s) => s.user);
   const queryClient = useQueryClient();
 
+  const canAdminister = isPlatformAdmin(currentUser?.role);
+  // Only the super admin may touch another administrator or hand out the
+  // admin role. The server enforces this (app/routers/auth.py
+  // ::_require_can_administer); mirroring it here means the UI shows a
+  // disabled control with a reason instead of a 403 after the click.
+  const canAdministerAdmins = isSuperAdmin(currentUser?.role);
+  const assignableRoles: AssignableRole[] = canAdministerAdmins
+    ? ["viewer", "editor", "admin"]
+    : ["viewer", "editor"];
+
   const [err, setErr] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
 
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<UserRow["role"]>("viewer");
+  const [role, setRole] = useState<AssignableRole>("viewer");
 
   const { data: users, isLoading } = useQuery({
     queryKey: ["users"],
     queryFn: listUsers,
-    enabled: isAuthenticated() && currentUser?.role === "admin",
+    enabled: isAuthenticated() && canAdminister,
   });
 
   const createMutation = useMutation({
@@ -46,9 +67,10 @@ export function Users() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (vars: { id: number; role?: UserRow["role"] }) => updateUser(vars.id, { role: vars.role }),
+    mutationFn: (vars: { id: number; role?: AssignableRole; is_active?: boolean }) =>
+      updateUser(vars.id, { role: vars.role, is_active: vars.is_active }),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["users"] }),
-    onError: (e) => setErr(e instanceof Error ? e.message : "Failed to update role"),
+    onError: (e) => setErr(e instanceof Error ? e.message : "Failed to update user"),
   });
 
   const deactivateMutation = useMutation({
@@ -78,7 +100,7 @@ export function Users() {
     );
   }
 
-  if (currentUser?.role !== "admin") {
+  if (!canAdminister) {
     return (
       <div>
         <PageHeader title="Users" subtitle="Platform user administration." />
@@ -95,7 +117,11 @@ export function Users() {
     <div>
       <PageHeader
         title="Users"
-        subtitle="Create accounts and manage roles and active status. Global platform roles — distinct from per-organization roles on the Members page."
+        subtitle={
+          canAdministerAdmins
+            ? "Create accounts and manage roles and active status. Global platform roles — distinct from per-organization roles on the Members page."
+            : "Create accounts and manage roles and active status. Administrator accounts can only be changed by the super admin."
+        }
       />
 
       {err ? (
@@ -135,13 +161,15 @@ export function Users() {
           />
           <select
             value={role}
-            onChange={(e) => setRole(e.target.value as UserRow["role"])}
+            onChange={(e) => setRole(e.target.value as AssignableRole)}
             aria-label="Role"
             className="field"
           >
-            <option value="viewer">viewer</option>
-            <option value="editor">editor</option>
-            <option value="admin">admin</option>
+            {assignableRoles.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
           </select>
           <Button
             type="submit"
@@ -174,6 +202,22 @@ export function Users() {
             <tbody className="divide-y divide-ink-100 dark:divide-ink-800">
               {users.map((u) => {
                 const isSelf = u.id === currentUser?.id;
+                // The super admin is immutable for everyone, themselves
+                // included — there is no account above it to undo a mistake.
+                const isProtected = isSuperAdmin(u.role);
+                // A plain admin may manage viewers and editors, but not peers.
+                const isLockedPeer = isPlatformAdmin(u.role) && !isSelf && !canAdministerAdmins;
+                // The server would accept an admin stepping themselves down;
+                // the UI doesn't offer it, because the role dropdown has no
+                // admin option for a non-super-admin, so the click would be
+                // one-way — they could not put themselves back.
+                const isOwnAdminRow = isSelf && isPlatformAdmin(u.role) && !canAdministerAdmins;
+                const roleLocked = isProtected || isLockedPeer || isOwnAdminRow;
+                const lockReason = isProtected
+                  ? "The super admin account cannot be modified"
+                  : isOwnAdminRow
+                    ? "You cannot change your own admin role — ask the super admin"
+                    : "Only the super admin can modify another administrator";
                 return (
                   <tr key={u.id}>
                     <td className="px-4 py-3 font-medium text-ink-900 dark:text-ink-100">{u.username}</td>
@@ -184,17 +228,27 @@ export function Users() {
                           size to its content or it pushes the badge onto a
                           second line. */}
                       <div className="flex items-center gap-2">
-                        <select
-                          value={u.role}
-                          disabled={updateMutation.isPending}
-                          onChange={(e) => updateMutation.mutate({ id: u.id, role: e.target.value as UserRow["role"] })}
-                          aria-label={`Role for ${u.username}`}
-                          className="field !w-auto !py-1.5"
-                        >
-                          <option value="viewer">viewer</option>
-                          <option value="editor">editor</option>
-                          <option value="admin">admin</option>
-                        </select>
+                        {roleLocked ? (
+                          <span className="text-ink-400 dark:text-ink-500" title={lockReason}>
+                            <Lock className="h-4 w-4" aria-label={lockReason} />
+                          </span>
+                        ) : (
+                          <select
+                            value={u.role}
+                            disabled={updateMutation.isPending}
+                            onChange={(e) =>
+                              updateMutation.mutate({ id: u.id, role: e.target.value as AssignableRole })
+                            }
+                            aria-label={`Role for ${u.username}`}
+                            className="field !w-auto !py-1.5"
+                          >
+                            {assignableRoles.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))}
+                          </select>
+                        )}
                         <Badge variant={roleVariant[u.role]}>{u.role}</Badge>
                       </div>
                     </td>
@@ -204,10 +258,28 @@ export function Users() {
                     <td className="px-4 py-3 text-ink-500 dark:text-ink-400">{u.mfa_enabled ? "on" : "—"}</td>
                     <td className="px-4 py-3 text-ink-500 dark:text-ink-400">{new Date(u.created_at).toLocaleDateString()}</td>
                     <td className="px-4 py-3 text-right">
-                      {!u.is_active ? null : isSelf ? (
+                      {/* isSelf first: "you cannot deactivate your own
+                          account" is the accurate reason for this column,
+                          and a signed-in user is never inactive. */}
+                      {isSelf ? (
                         <span className="text-xs text-ink-400" title="You cannot deactivate your own account">
                           —
                         </span>
+                      ) : roleLocked ? (
+                        <span className="text-xs text-ink-400" title={lockReason}>
+                          —
+                        </span>
+                      ) : !u.is_active ? (
+                        // Without this a deactivated row's action cell was
+                        // empty forever — deactivating was a one-way door.
+                        <Button
+                          variant="secondary"
+                          className="px-2 py-1 text-xs"
+                          disabled={updateMutation.isPending}
+                          onClick={() => updateMutation.mutate({ id: u.id, is_active: true })}
+                        >
+                          Reactivate
+                        </Button>
                       ) : confirmingId === u.id ? (
                         <div className="flex justify-end gap-2">
                           <Button

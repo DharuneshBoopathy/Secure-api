@@ -28,10 +28,11 @@ test.describe("Authentication", () => {
   test("registers a new account and lands on the dashboard as a viewer", async ({ page }) => {
     const username = `e2e_user_${Date.now()}`;
     await page.goto("/register");
-    await page.getByPlaceholder("johndoe").fill(username);
-    await page.getByPlaceholder("you@example.com").fill(`${username}@example.com`);
-    await page.getByPlaceholder("Strong password").fill("Str0ng!Passw0rd");
-    await page.getByPlaceholder("Repeat password").fill("Str0ng!Passw0rd");
+    // The register form has no placeholders; its labels are htmlFor-bound.
+    await page.getByLabel("Username").fill(username);
+    await page.getByLabel("Email").fill(`${username}@example.com`);
+    await page.getByLabel("Password", { exact: true }).fill("Str0ng!Passw0rd");
+    await page.getByLabel("Confirm password").fill("Str0ng!Passw0rd");
     await page.getByRole("button", { name: "Create account" }).click();
 
     await expect(page).toHaveURL("/");

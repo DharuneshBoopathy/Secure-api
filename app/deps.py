@@ -17,7 +17,15 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import get_db
 from app.models import ApiKey, Organization, OrgMembership, User
-from app.security import API_KEY_PREFIX, OrgRole, Role, decode_token, hash_token, utc_now
+from app.security import (
+    API_KEY_PREFIX,
+    OrgRole,
+    Role,
+    decode_token,
+    hash_token,
+    is_platform_admin,
+    utc_now,
+)
 from app.services.audit_service import log_audit_event
 
 
@@ -252,7 +260,7 @@ def _resolve_org_context(
         if membership is not None:
             return OrgContext(org_id=x_org_id, role=OrgRole(membership.role))
 
-        if current_user.role == Role.ADMIN.value:
+        if is_platform_admin(current_user.role):
             org = db.query(Organization).filter(Organization.id == x_org_id).one_or_none()
             if org is not None:
                 log_audit_event(
@@ -365,7 +373,7 @@ def get_stream_org_context(
                 )
                 if membership is not None:
                     return OrgContext(org_id=org_id, role=OrgRole(membership.role))
-                if ticket_user.role == Role.ADMIN.value:
+                if is_platform_admin(ticket_user.role):
                     return OrgContext(org_id=org_id, role=OrgRole.OWNER, is_cross_org_admin=True)
 
     raise HTTPException(
