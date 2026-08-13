@@ -49,12 +49,13 @@ services:
       # auto-deploy on a new push to the tag, so a floating tag buys nothing
       # and only hides which build is actually live.
       #
-      # fc04caf is main, published by CD run 31666842618 as a multi-arch
-      # manifest (linux/amd64 + linux/arm64). It carries the super-admin tier,
-      # the audit-log fixes, and the DATABASE_URL boot guard — which means this
-      # image will not start until DATABASE_URL names a durable database. That
-      # is deliberate; see the header comment.
-      url: ghcr.io/dharuneshboopathy/secure-api:fc04caf0e85f422026cac78ff27576e490aa986c
+      # 25063cf is main, published by CD run 31669441288 as a multi-arch
+      # manifest (linux/amd64 + linux/arm64), verified present in GHCR before
+      # this pin was written. It carries the super-admin tier, the audit-log
+      # fixes, and the DATABASE_URL guard in its intent-split form: it boots on
+      # the SQLite URL this service is configured with, and says so loudly in
+      # the deploy log every time. See the header comment.
+      url: ghcr.io/dharuneshboopathy/secure-api:25063cff2b4a45b943c584a5c108d01fbedc593a
 
     # Deliberately no dockerCommand. The image's own CMD already chains
     # `alembic upgrade head && uvicorn ...`, and it works because Docker runs
