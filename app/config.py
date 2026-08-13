@@ -243,21 +243,35 @@ def validate_security_settings() -> None:
 
     # ── Production: strict enforcement ───────────────────────────────────────
     errors: list[str] = []
-    # Checked by provenance and dialect, not truthiness. `database_url` has a
-    # non-empty SQLite default, so an unset DATABASE_URL is never falsy here —
-    # it silently resolves to a file inside the container. On a host with no
-    # persistent disk (Render's free plan cannot attach one) that file is born
-    # empty on every cold start, so the whole database — audit_log included —
-    # is discarded each time the service wakes from a spin-down, while
-    # ensure_default_admin recreates the admin account and makes the instance
-    # look healthy. Fail the boot instead of losing the evidence quietly.
+    # Checked by provenance, not truthiness. `database_url` has a non-empty
+    # SQLite default, so an unset DATABASE_URL is never falsy here — it silently
+    # resolves to a file inside the container. On a host with no persistent disk
+    # (Render's free plan cannot attach one) that file is born empty on every
+    # cold start, so the whole database — audit_log included — is discarded each
+    # time the service wakes from a spin-down, while ensure_default_admin
+    # recreates the admin account and makes the instance look healthy.
+    #
+    # Unset is an accident and stays fatal: nobody chose the fallback, and the
+    # symptom is invisible from outside. An explicit sqlite:// URL is a
+    # different thing — somebody typed it — so it warns loudly and boots. The
+    # distinction is intent, not durability; both are equally ephemeral, which
+    # is why the warning says so in as many words rather than hinting.
     if "database_url" not in s.model_fields_set or not s.database_url.strip():
         errors.append("DATABASE_URL is not set")
     elif s.database_url.startswith("sqlite"):
-        errors.append(
-            "DATABASE_URL points at SQLite, which is stored inside the container "
-            "and is lost on every restart — production needs a database that "
-            "outlives the process"
+        log.warning(
+            "\n"
+            "  ┌──────────────────────────────────────────────────────────────┐\n"
+            "  │  EPHEMERAL DATABASE — production is running on SQLite        │\n"
+            "  ├──────────────────────────────────────────────────────────────┤\n"
+            "  │  This file lives inside the container. Every restart, deploy │\n"
+            "  │  and idle spin-down starts it empty: users, organizations,   │\n"
+            "  │  traffic history and the audit log are all discarded, and    │\n"
+            "  │  the bootstrap admin is recreated so nothing looks wrong.    │\n"
+            "  │  Set DATABASE_URL to a durable database to keep any of it.   │\n"
+            "  └──────────────────────────────────────────────────────────────┘\n"
+            "  DATABASE_URL=%s",
+            s.database_url,
         )
     if not s.monitor_api_key:
         errors.append("MONITOR_API_KEY is not set")

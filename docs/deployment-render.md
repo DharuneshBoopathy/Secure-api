@@ -154,14 +154,17 @@ too-short secret. A hang followed by an `OperationalError` instead means
 
 Two of that guard's messages are about this section specifically:
 
-| Message | Cause |
-|---|---|
-| `DATABASE_URL is not set` | The blueprint prompt was skipped or left blank. Set it under **Environment** and redeploy. |
-| `DATABASE_URL points at SQLite …` | A SQLite URL was pasted, or copied from a local `.env`. SQLite lives inside the container and this plan has no disk, so it is refused rather than accepted and quietly discarded. |
+| Message | Severity | Cause |
+|---|---|---|
+| `DATABASE_URL is not set` | fatal | The blueprint prompt was skipped or left blank. Nobody chose the SQLite fallback it would otherwise land on, and the resulting data loss is invisible from outside, so the boot fails instead. Set it under **Environment** and redeploy. |
+| `EPHEMERAL DATABASE — production is running on SQLite` | warning | A SQLite URL was set deliberately, or copied from a local `.env`. The service boots, and every restart, deploy and idle spin-down starts it empty. |
 
-Both are deliberate hard failures. A service that will not boot is recoverable
-in a minute; a service that boots onto empty storage loses its audit trail and
-says nothing.
+The split is about intent, not durability — both land on storage this plan
+discards. An unset variable is an accident worth failing over; an explicit
+`sqlite://` URL is a decision, so it is allowed and logged in a banner that
+names what it costs. If the audit log matters, the warning is the thing to act
+on: it will be in the deploy log on every single boot until `DATABASE_URL`
+names a real database.
 
 ### Do not add a dockerCommand
 

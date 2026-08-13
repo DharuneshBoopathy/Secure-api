@@ -11,8 +11,12 @@ the entire database is discarded while ensure_default_admin recreates the admin
 account and the instance still looks healthy. The audit log is the most
 conspicuous casualty, and the least acceptable one for a security product.
 
-These tests pin the guard to provenance and dialect rather than truthiness.
+These tests pin the guard to provenance rather than truthiness, and pin the
+intent split: an unset DATABASE_URL is fatal because nobody chose the fallback,
+while an explicit sqlite:// URL boots with a warning that names what it costs.
 """
+
+import logging
 
 import pytest
 
@@ -56,13 +60,22 @@ def test_unset_database_url_refuses_to_start(patched):
         validate_security_settings()
 
 
-def test_explicit_sqlite_url_refuses_to_start(patched):
-    """Setting DATABASE_URL to SQLite on purpose is no more durable than
-    leaving it unset, so it is rejected too — with a message that says why."""
-    patched(_settings(database_url="sqlite:///./apimonitor.db"))
+def test_explicit_sqlite_url_boots_with_a_warning(caplog):
+    """An explicit sqlite:// URL is an operator decision, not the silent
+    fallback, so it is allowed — but it is no more durable, so the warning has
+    to name the consequence rather than hint at it."""
+    settings = _settings(database_url="sqlite:////tmp/apimonitor.db")
 
-    with pytest.raises(RuntimeError, match="lost on every restart"):
-        validate_security_settings()
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("app.config.get_settings", lambda: settings)
+            validate_security_settings()  # must not raise
+
+    warning = caplog.text
+    assert "EPHEMERAL DATABASE" in warning
+    assert "audit log" in warning
+    # The operator has to be able to see which path is in play.
+    assert "sqlite:////tmp/apimonitor.db" in warning
 
 
 def test_blank_database_url_refuses_to_start(patched):
@@ -89,14 +102,21 @@ def test_guard_is_production_only(patched):
     validate_security_settings()  # must not raise
 
 
-def test_sqlite_error_names_the_variable_and_the_consequence(patched):
-    """The failure is only useful if the operator can act on it without
-    reading the source."""
-    patched(_settings(database_url="sqlite:///./apimonitor.db"))
+def test_unset_and_explicit_sqlite_are_treated_differently(caplog):
+    """The whole point of the provenance check: the same resolved value is
+    fatal when nobody chose it and permitted when somebody did."""
+    default = _settings()
+    explicit = _settings(database_url=default.database_url)
+    assert default.database_url == explicit.database_url, "same value either way"
 
-    with pytest.raises(RuntimeError) as exc:
-        validate_security_settings()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.config.get_settings", lambda: default)
+        with pytest.raises(RuntimeError, match="DATABASE_URL is not set"):
+            validate_security_settings()
 
-    message = str(exc.value)
-    assert "DATABASE_URL" in message
-    assert "SQLite" in message
+    with caplog.at_level(logging.WARNING, logger="app.config"):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("app.config.get_settings", lambda: explicit)
+            validate_security_settings()  # must not raise
+
+    assert "EPHEMERAL DATABASE" in caplog.text

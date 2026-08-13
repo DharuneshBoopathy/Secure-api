@@ -13,11 +13,16 @@
 # on the live service: a cold /health answers in ~86s, a warm one in ~0.5s.
 #
 # That is not a theoretical risk. It already cost this deployment its audit
-# log: DATABASE_URL was resolving to the app's SQLite default, every wake-up
-# started an empty database, and ensure_default_admin recreated the admin
-# account on each boot so the instance still looked healthy. The app now
-# refuses to start in production on an unset, blank, or SQLite DATABASE_URL
-# (app/config.py::validate_security_settings) rather than lose data quietly.
+# log: DATABASE_URL was resolving to SQLite, every wake-up started an empty
+# database, and ensure_default_admin recreated the admin account on each boot
+# so the instance still looked healthy.
+#
+# app/config.py::validate_security_settings now refuses to start on an unset or
+# blank DATABASE_URL, and logs an EPHEMERAL DATABASE banner on every boot when
+# one is set to SQLite deliberately. This service is currently in the second
+# case: it runs on sqlite:////tmp/apimonitor.db and therefore keeps nothing
+# between spin-downs. That is a known, chosen trade — swap DATABASE_URL for a
+# managed MySQL below to end it.
 #
 # Render's own free Postgres is deleted 30 days after creation, and this app
 # speaks MySQL (pymysql) rather than Postgres, so DATABASE_URL points at a free
@@ -87,17 +92,17 @@ services:
       # itself needs no flag: it is on by default in uvicorn.
       - key: FORWARDED_ALLOW_IPS
         value: "*"
-      # REQUIRED — the service will not boot without it, by design. sync: false
-      # means Render prompts for this instead of reading it from here, because
-      # this file is public and the URL carries the password. Paste the MySQL
-      # connection string from TiDB Cloud or Aiven, TLS parameters included;
-      # see docs/deployment-render.md for the exact shape.
+      # REQUIRED — the service will not boot if this is unset or blank. sync:
+      # false means Render prompts for it instead of reading it from here,
+      # because this file is public and the URL carries the password. Paste the
+      # MySQL connection string from TiDB Cloud or Aiven, TLS parameters
+      # included; see docs/deployment-render.md for the exact shape.
       #
-      # Skipping the prompt does not fall back to something harmless: it leaves
-      # the app on its container-local SQLite default, which this plan discards
-      # on every spin-down. Production now treats that as a fatal misconfig, so
-      # a skipped prompt fails the deploy instead of silently losing every
-      # table between visits. Set it before deploying, not after.
+      # A sqlite:// value is accepted — deliberately setting one is a decision
+      # the guard defers to — but it buys nothing this plan can keep, and the
+      # boot log will say so every time. The live service is on one today.
+      # Replacing it with a managed MySQL string is the whole fix; nothing else
+      # here needs to change.
       - key: DATABASE_URL
         sync: false
       # The demo/debug router is documented as development-only (app/config.py).
