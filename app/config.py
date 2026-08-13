@@ -85,7 +85,10 @@ class Settings(BaseSettings):
     # password nor a conspicuously absent one. This is the same zero-setup path
     # the README documents for running without Docker; every real deployment
     # sets DATABASE_URL explicitly (docker-compose.yml, k8s/configmap.yaml),
-    # and production refuses to start without it (validate_security_settings).
+    # and production refuses to start on this default — or on any SQLite URL —
+    # because it is container-local and does not survive a restart. See
+    # validate_security_settings, which tests provenance rather than truthiness
+    # precisely because this default is non-empty.
     database_url: str = "sqlite:///./apimonitor.db"
     monitor_api_key: str = Field(default_factory=lambda: secrets.token_urlsafe(32))
     secret_key: str = Field(default_factory=lambda: secrets.token_hex(32))
@@ -240,8 +243,22 @@ def validate_security_settings() -> None:
 
     # ── Production: strict enforcement ───────────────────────────────────────
     errors: list[str] = []
-    if not s.database_url:
+    # Checked by provenance and dialect, not truthiness. `database_url` has a
+    # non-empty SQLite default, so an unset DATABASE_URL is never falsy here —
+    # it silently resolves to a file inside the container. On a host with no
+    # persistent disk (Render's free plan cannot attach one) that file is born
+    # empty on every cold start, so the whole database — audit_log included —
+    # is discarded each time the service wakes from a spin-down, while
+    # ensure_default_admin recreates the admin account and makes the instance
+    # look healthy. Fail the boot instead of losing the evidence quietly.
+    if "database_url" not in s.model_fields_set or not s.database_url.strip():
         errors.append("DATABASE_URL is not set")
+    elif s.database_url.startswith("sqlite"):
+        errors.append(
+            "DATABASE_URL points at SQLite, which is stored inside the container "
+            "and is lost on every restart — production needs a database that "
+            "outlives the process"
+        )
     if not s.monitor_api_key:
         errors.append("MONITOR_API_KEY is not set")
     if not s.secret_key or len(s.secret_key) < 32:
