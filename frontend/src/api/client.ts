@@ -276,6 +276,35 @@ export type Paginated<T> = {
   page_size: number;
 };
 
+/**
+ * Keyset-paginated response. Distinct from Paginated<T>: there is no `total`,
+ * because counting the whole table on every page is the O(N) cost this scheme
+ * exists to avoid. `next_cursor_id` is null on the last page.
+ */
+export type Cursor<T> = {
+  items: T[];
+  next_cursor_id: number | null;
+};
+
+export type AuditRow = {
+  id: number;
+  event_type: string;
+  actor: string;
+  target: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  timestamp: string;
+  success: boolean;
+};
+
+/** One page of audit events, newest first. Pass the previous page's
+ *  `next_cursor_id` to walk backwards through history. */
+export function listAudit(cursorId?: number | null, limit = 100) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursorId != null) params.set("cursor_id", String(cursorId));
+  return apiFetch<Cursor<AuditRow>>(`/audit?${params.toString()}`);
+}
+
 export type TrafficEventOut = {
   id: number;
   ts: string;
