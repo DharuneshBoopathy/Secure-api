@@ -5,10 +5,24 @@
 # even on tiers that never charge. 750 instance-hours a month covers one
 # service running continuously.
 #
-# The database lives outside Render. Render's own free Postgres is deleted 30
-# days after creation, and this app speaks MySQL (pymysql) rather than
-# Postgres, so DATABASE_URL points at a free managed MySQL instead — TiDB
-# Cloud Starter, or Aiven for MySQL. Neither needs a card either.
+# The database lives outside Render, and on this plan it has to. A free service
+# gets no persistent disk — `disk:` is a paid-instance feature, so there is no
+# spelling of this file that keeps a file-backed database — and it spins down
+# after ~15 minutes of inactivity, returning on the next request as a fresh
+# container. Anything written inside that container is gone by then. Measured
+# on the live service: a cold /health answers in ~86s, a warm one in ~0.5s.
+#
+# That is not a theoretical risk. It already cost this deployment its audit
+# log: DATABASE_URL was resolving to the app's SQLite default, every wake-up
+# started an empty database, and ensure_default_admin recreated the admin
+# account on each boot so the instance still looked healthy. The app now
+# refuses to start in production on an unset, blank, or SQLite DATABASE_URL
+# (app/config.py::validate_security_settings) rather than lose data quietly.
+#
+# Render's own free Postgres is deleted 30 days after creation, and this app
+# speaks MySQL (pymysql) rather than Postgres, so DATABASE_URL points at a free
+# managed MySQL instead — TiDB Cloud Starter, or Aiven for MySQL. Neither needs
+# a card either.
 #
 # Create the service from this file: Render dashboard → New → Blueprint →
 # pick this repository. Full walkthrough in docs/deployment-render.md.
@@ -70,15 +84,25 @@ services:
       # itself needs no flag: it is on by default in uvicorn.
       - key: FORWARDED_ALLOW_IPS
         value: "*"
-      # sync: false means Render prompts for this instead of reading it from
-      # here — this file is public and the URL carries the password. Paste the
-      # MySQL connection string from TiDB Cloud or Aiven, TLS parameters
-      # included; see docs/deployment-render.md for the exact shape.
+      # REQUIRED — the service will not boot without it, by design. sync: false
+      # means Render prompts for this instead of reading it from here, because
+      # this file is public and the URL carries the password. Paste the MySQL
+      # connection string from TiDB Cloud or Aiven, TLS parameters included;
+      # see docs/deployment-render.md for the exact shape.
+      #
+      # Skipping the prompt does not fall back to something harmless: it leaves
+      # the app on its container-local SQLite default, which this plan discards
+      # on every spin-down. Production now treats that as a fatal misconfig, so
+      # a skipped prompt fails the deploy instead of silently losing every
+      # table between visits. Set it before deploying, not after.
       - key: DATABASE_URL
         sync: false
       # The demo/debug router is documented as development-only (app/config.py).
       # The earlier draft of this file enabled it because the database was
-      # wiped on every deploy; it is durable now, and public, so it stays off.
+      # wiped on every deploy — which, it turned out, remained true long after
+      # this comment claimed otherwise. The boot guard above is what actually
+      # makes durability hold; the instance is public either way, so it stays
+      # off.
       - key: ENABLE_DEMO
         value: "false"
       - key: EXPOSE_API_DOCS
