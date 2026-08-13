@@ -42,11 +42,14 @@ services:
     image:
       # Pinned to a commit rather than :latest. Image-backed services do not
       # auto-deploy on a new push to the tag, so a floating tag buys nothing
-      # and only hides which build is actually live. This commit is the last
-      # one CD published; app/, frontend/, alembic/, requirements.lock and
-      # the Dockerfile are unchanged since — the revert that followed it
-      # touched only deployment files and docs.
-      url: ghcr.io/dharuneshboopathy/secure-api:62a8a51e96a0d3a0c30a3631d73ff12782e98796
+      # and only hides which build is actually live.
+      #
+      # fc04caf is main, published by CD run 31666842618 as a multi-arch
+      # manifest (linux/amd64 + linux/arm64). It carries the super-admin tier,
+      # the audit-log fixes, and the DATABASE_URL boot guard — which means this
+      # image will not start until DATABASE_URL names a durable database. That
+      # is deliberate; see the header comment.
+      url: ghcr.io/dharuneshboopathy/secure-api:fc04caf0e85f422026cac78ff27576e490aa986c
 
     # Deliberately no dockerCommand. The image's own CMD already chains
     # `alembic upgrade head && uvicorn ...`, and it works because Docker runs
