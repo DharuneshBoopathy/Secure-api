@@ -117,6 +117,14 @@ needs a manual power-on, which pairs badly with an app that sleeps.
 Watch the deploy log: Alembic reports four migrations already at head, then
 uvicorn binds. Render marks the service live once `/health` answers.
 
+That "already at head" line is the durability check, and it is worth reading
+every time. If Alembic *applies* four migrations on a boot that is not the
+first one, it found an empty database — the service is running on storage that
+did not survive the last spin-down, and every table went with it. The instance
+will still look healthy, because `ensure_default_admin` recreates the admin
+account on each boot and login keeps working; the audit log is usually the
+first place anyone notices the loss.
+
 ```bash
 APP=https://api-security-monitor.onrender.com   # replace if you renamed the service
 
@@ -143,6 +151,17 @@ there. Then leave it idle for 15+ minutes, wake it, and check once more.
 too-short secret. A hang followed by an `OperationalError` instead means
 `wait_for_database` exhausted its ten retries: check the TLS parameters on
 `DATABASE_URL` first.
+
+Two of that guard's messages are about this section specifically:
+
+| Message | Cause |
+|---|---|
+| `DATABASE_URL is not set` | The blueprint prompt was skipped or left blank. Set it under **Environment** and redeploy. |
+| `DATABASE_URL points at SQLite …` | A SQLite URL was pasted, or copied from a local `.env`. SQLite lives inside the container and this plan has no disk, so it is refused rather than accepted and quietly discarded. |
+
+Both are deliberate hard failures. A service that will not boot is recoverable
+in a minute; a service that boots onto empty storage loses its audit trail and
+says nothing.
 
 ### Do not add a dockerCommand
 
